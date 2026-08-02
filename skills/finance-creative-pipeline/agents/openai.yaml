@@ -1,0 +1,4 @@
+interface:
+  display_name: "Finance Creative Pipeline"
+  short_description: "采集参考、生成单张预览并整理原生Figma图层"
+  default_prompt: "Use $finance-creative-pipeline to run today’s finance creative workflow."

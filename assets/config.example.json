@@ -1,0 +1,23 @@
+{
+  "timezone": "Asia/Shanghai",
+  "chromeExecutable": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  "profileDirectory": "~/Library/Application Support/Codex/finance-creative-pipeline/chrome-profile",
+  "outputRoot": "~/Desktop/互联网金融素材",
+  "figma": {
+    "fileKey": "YOUR_FIGMA_FILE_KEY",
+    "pageId": "0:1"
+  },
+  "collection": {
+    "referenceCount": 20,
+    "recentDays": 30,
+    "seedKeywords": ["互联网金融", "借贷", "助贷", "小贷", "360金融", "宜信", "度小满", "宜享花", "洋钱罐", "马上消费金融", "支付宝"],
+    "formatKeywords": ["弹窗", "Banner", "悬浮飘窗", "浮窗", "运营活动", "Icon"]
+  },
+  "generation": {
+    "directionCount": 10,
+    "maxRetries": 2,
+    "brandNeutral": true,
+    "analysisTimeoutMinutes": 6,
+    "imageTimeoutMinutes": 12
+  }
+}

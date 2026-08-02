@@ -1,0 +1,25 @@
+{
+  "name": "finance-creative-pipeline",
+  "version": "0.1.0+codex.20260802090535",
+  "description": "Collect finance creative references, generate one original preview per direction through ChatGPT Web, and organize native editable outputs in Figma.",
+  "author": {
+    "name": "Snake"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Finance Creative Pipeline",
+    "shortDescription": "\u82b1\u74e3\u91c7\u96c6\u3001ChatGPT\u7f51\u9875\u751f\u56fe\u4e0eFigma\u5206\u5c42\u6574\u7406",
+    "longDescription": "\u6bcf\u5929\u91c7\u96c6\u4e92\u8054\u7f51\u91d1\u878d\u8fd0\u8425\u53c2\u8003\u56fe\uff0c\u901a\u8fc7ChatGPT\u7f51\u9875\u7248\u5206\u6790\u5e76\u751f\u6210\u54c1\u724c\u4e2d\u6027\u8bbe\u8ba1\uff0c\u518d\u4fdd\u5b58\u5230\u672c\u5730\u5e76\u6574\u7406\u4e3a\u53ef\u7f16\u8f91Figma\u56fe\u5c42\u3002\u652f\u6301\u65ad\u70b9\u6062\u590d\u548c\u5206\u4eab\u5b89\u88c5\u3002",
+    "developerName": "Snake",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "\u8fd0\u884c\u4eca\u5929\u7684\u91d1\u878d\u8fd0\u8425\u7d20\u6750\u6d41\u6c34\u7ebf\u3002",
+      "\u68c0\u67e5\u5e76\u7ee7\u7eed\u4e0a\u6b21\u4e2d\u65ad\u7684\u7d20\u6750\u4efb\u52a1\u3002",
+      "\u4e3a\u91d1\u878d\u8fd0\u8425\u7d20\u6750\u6d41\u6c34\u7ebf\u5b8c\u6210\u9996\u6b21\u767b\u5f55\u8bbe\u7f6e\u3002"
+    ]
+  }
+}

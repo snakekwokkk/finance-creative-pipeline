@@ -1,0 +1,18 @@
+{
+  "name": "finance-creative-pipeline-runtime",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "setup": "node scripts/setup-login.mjs",
+    "run": "node scripts/run.mjs",
+    "test-run": "node scripts/run.mjs --test",
+    "check-missed": "node scripts/check-missed.mjs",
+    "mark-figma-complete": "node scripts/mark-figma-complete.mjs",
+    "check": "node --check scripts/run.mjs && node --check scripts/setup-login.mjs && node --check scripts/check-missed.mjs && node --check scripts/mark-figma-complete.mjs && node --check scripts/lib/collector.mjs && node --check scripts/lib/chatgpt-web.mjs"
+  },
+  "dependencies": {
+    "playwright-core": "^1.54.2",
+    "sharp": "^0.34.3"
+  }
+}
