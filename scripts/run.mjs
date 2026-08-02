@@ -38,15 +38,15 @@ try {
   const huaban = await findOrOpenPage(context, "https://huaban.com", "https://huaban.com/discovery");
   const chatgpt = await findOrOpenPage(context, "https://chatgpt.com", "https://chatgpt.com/");
 
-  await updateRun(runFile, { status: "running", stages: { collection: "running", generation: "pending", figma: "pending" } });
+  await updateRun(runFile, { status: "running", stages: { collection: "running", generation: "pending", decomposition: "pending", figma: "pending" } });
   const references = await collectReferences({ context, page: huaban, config, runDir, date, count: referenceCount });
-  await updateRun(runFile, { status: "running", referenceCount: references.length, stages: { collection: "complete", generation: "running", figma: "pending" } });
+  await updateRun(runFile, { status: "running", referenceCount: references.length, stages: { collection: "complete", generation: "running", decomposition: "pending", figma: "pending" } });
   const manifest = await generateDirections({ page: chatgpt, config, runDir, references, count: directionCount });
   await updateRun(runFile, {
     status: "awaiting_figma",
     directionCount: manifest.directions.filter((item) => item.status === "ready").length,
     figmaManifest: path.join(runDir, "figma-manifest.json"),
-    stages: { collection: "complete", generation: "complete", figma: "pending" }
+    stages: { collection: "complete", generation: "complete", decomposition: "complete", figma: "pending" }
   });
   await notify("金融运营素材流水线", `本地素材和生图已完成，等待写入 Figma：${runDir}`);
   console.log(JSON.stringify({ status: "awaiting_figma", runDir, manifest: path.join(runDir, "figma-manifest.json") }));

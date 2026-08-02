@@ -25,7 +25,7 @@ export async function ensureRun(runFile, date, testMode) {
   if (existing) return existing;
   const initial = {
     date, testMode, status: "created",
-    stages: { collection: "pending", generation: "pending", figma: "pending" },
+    stages: { collection: "pending", generation: "pending", decomposition: "pending", figma: "pending" },
     errors: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
   };
   await writeJsonAtomic(runFile, initial);

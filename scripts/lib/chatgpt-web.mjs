@@ -1,7 +1,12 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { pluginRoot } from "./config.mjs";
 import { readJson, writeJsonAtomic } from "./state.mjs";
 import { screenshotFailure } from "./browser.mjs";
+
+const execFileAsync = promisify(execFile);
 
 function minuteTimeout(value) {
   return Math.max(1, Number(value || 1)) * 60_000;
@@ -11,6 +16,12 @@ function extractJson(text) {
   const marked = text.match(/FINANCE_SPEC_START\s*([\s\S]*?)\s*FINANCE_SPEC_END/);
   const candidate = marked?.[1] || text.match(/```json\s*([\s\S]*?)```/i)?.[1];
   if (!candidate) throw new Error("ChatGPT 回复中未找到结构化 JSON");
+  return JSON.parse(candidate.trim());
+}
+
+function extractMarkedJson(text, start, end) {
+  const candidate = text.match(new RegExp(`${start}\\s*([\\s\\S]*?)\\s*${end}`))?.[1] || text.match(/```json\\s*([\\s\\S]*?)```/i)?.[1];
+  if (!candidate) throw new Error(`ChatGPT 回复中未找到 ${start} JSON`);
   return JSON.parse(candidate.trim());
 }
 
@@ -201,6 +212,25 @@ function previewPrompt(spec, width, height) {
   return `请根据下面的规格直接生成一张完整的中国互联网金融运营设计图，画布比例约为 ${width}:${height}。保持品牌中性，不出现任何真实公司名称、Logo、二维码、手机号或夸大审批承诺。中文文字应清晰，整体原创。\n\n${JSON.stringify(spec, null, 2)}`;
 }
 
+function decompositionPrompt(index, width, height) {
+  return `你是一名负责UI拆图和审图的视觉分析师。下面上传的是刚生成的第${index}套完整运营设计图，画布为 ${width}x${height}。请只分析这张图，不要生成新图片。目标是把它拆成可在Figma中重组的图层计划。\n\n识别背景、卡片、主视觉素材、插画、角标、徽章、Icon、装饰、按钮和所有可编辑文字。每个图层输出归一化0到1的bbox（x,y,width,height）。对非矩形素材尽量给出归一化polygon mask points；无法确定轮廓时将 mask 留空，并在 confidence 中降低。文字必须输出原文、字体气质、字号相对等级、颜色、对齐和安全的背景修复颜色；如果文字背后有渐变、纹理或复杂素材，repair.type 必须是 none。\n\n只输出以下标记包裹的合法JSON，不要解释：\nDECOMPOSE_START\n{\n  "schemaVersion": 1,\n  "canvas": {"width": ${width}, "height": ${height}},\n  "layers": [\n    {\n      "id": "background",\n      "role": "Background",\n      "kind": "background",\n      "bbox": {"x": 0, "y": 0, "width": 1, "height": 1},\n      "editable": "raster",\n      "confidence": 0.98\n    },\n    {\n      "id": "title",\n      "role": "Copy/Title",\n      "kind": "text",\n      "bbox": {"x": 0.2, "y": 0.4, "width": 0.6, "height": 0.08},\n      "text": "图中原文",\n      "typography": {"sizeLevel": "large", "weight": "bold", "color": "#000000", "align": "center"},\n      "repair": {"type": "solid", "color": "#FFFFFF"},\n      "editable": "text",\n      "confidence": 0.9\n    }\n  ]\n}\nDECOMPOSE_END\n\n不要改写图中文字，不要补充看不清的文案，不要把一整张图标成单一插画层。`;
+}
+
+async function decomposePreview(page, config, previewFile, directionDir, index, width, height) {
+  const layersFile = path.join(directionDir, "layers.json");
+  const cached = await readJson(layersFile);
+  if (cached?.layers?.length) return cached;
+  await startNewChat(page);
+  await attachFiles(page, [previewFile]);
+  const decompositionTimeout = config.generation.decompositionTimeoutMinutes || config.generation.analysisTimeoutMinutes;
+  const analysis = await sendAndRead(page, decompositionPrompt(index, width, height), minuteTimeout(decompositionTimeout));
+  const layers = extractMarkedJson(analysis.text, "DECOMPOSE_START", "DECOMPOSE_END");
+  await fs.writeFile(path.join(directionDir, "decomposition-analysis.txt"), analysis.text, "utf8");
+  await writeJsonAtomic(layersFile, layers);
+  await execFileAsync(process.execPath, [path.join(pluginRoot, "scripts", "decompose-image.mjs"), "--image", previewFile, "--layers", layersFile, "--out", path.join(directionDir, "layers")], { timeout: minuteTimeout(decompositionTimeout) });
+  return layers;
+}
+
 export async function generateDirections({ page, config, runDir, references, count }) {
   await ensureLoggedIn(page);
   const directionsDir = path.join(runDir, "directions");
@@ -210,10 +240,11 @@ export async function generateDirections({ page, config, runDir, references, cou
 
   for (let zero = 0; zero < count; zero += 1) {
     const index = zero + 1;
-    if (manifest.directions.some((item) => item.index === index && item.status === "ready")) continue;
     const directionDir = path.join(directionsDir, String(index).padStart(2, "0"));
     await fs.mkdir(directionDir, { recursive: true });
     const specFile = path.join(directionDir, "spec.json");
+    const existing = manifest.directions.find((item) => item.index === index && item.status === "ready");
+    if (existing && (await readJson(path.join(directionDir, "layers.json")))?.layers?.length) continue;
     let cachedSpec = await readJson(specFile);
     const pair = [references[(zero * 2) % references.length], references[(zero * 2 + 1) % references.length]];
     const type = index <= 6 ? "popup" : index <= 8 ? "banner" : "float";
@@ -240,9 +271,14 @@ export async function generateDirections({ page, config, runDir, references, cou
           await saveLastAssistantImage(page, previewFile, minuteTimeout(config.generation.imageTimeoutMinutes), previewImageSources);
         }
 
+        const layers = await decomposePreview(page, config, previewFile, directionDir, index, size.width, size.height);
+
         const entry = {
           index, status: "ready", type, ...size, previewFile,
           specFile: path.join(directionDir, "spec.json"),
+          layersFile: path.join(directionDir, "layers.json"),
+          decompositionReport: path.join(directionDir, "layers", "decomposition-report.json"),
+          layerCount: Array.isArray(layers.layers) ? layers.layers.length : 0,
           sourceUrls: pair.map((item) => item.sourceUrl),
           keywords: spec.keywords || [],
           copy: spec.copy || {}

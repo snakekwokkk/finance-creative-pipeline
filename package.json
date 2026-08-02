@@ -9,7 +9,8 @@
     "test-run": "node scripts/run.mjs --test",
     "check-missed": "node scripts/check-missed.mjs",
     "mark-figma-complete": "node scripts/mark-figma-complete.mjs",
-    "check": "node --check scripts/run.mjs && node --check scripts/setup-login.mjs && node --check scripts/check-missed.mjs && node --check scripts/mark-figma-complete.mjs && node --check scripts/lib/collector.mjs && node --check scripts/lib/chatgpt-web.mjs"
+    "decompose-image": "node scripts/decompose-image.mjs",
+    "check": "node --check scripts/run.mjs && node --check scripts/setup-login.mjs && node --check scripts/check-missed.mjs && node --check scripts/mark-figma-complete.mjs && node --check scripts/decompose-image.mjs && node --check scripts/lib/collector.mjs && node --check scripts/lib/chatgpt-web.mjs"
   },
   "dependencies": {
     "playwright-core": "^1.54.2",
