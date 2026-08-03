@@ -223,6 +223,27 @@ export function selectReferencePair(references, type, typeIndex) {
   return [pool[(typeIndex * 2) % pool.length], pool[(typeIndex * 2 + 1) % pool.length]];
 }
 
+export function recordDirectionFailure(manifest, failure) {
+  manifest.failures = (manifest.failures || [])
+    .filter((item) => item.index !== failure.index)
+    .concat(failure)
+    .sort((left, right) => left.index - right.index);
+}
+
+export function clearDirectionFailure(manifest, index) {
+  manifest.failures = (manifest.failures || []).filter((item) => item.index !== index);
+}
+
+export function activeDirectionFailures(manifest) {
+  const ready = new Set((manifest.directions || []).filter((item) => item.status === "ready").map((item) => item.index));
+  return (manifest.failures || []).filter((item) => !ready.has(item.index));
+}
+
+export function requiresUserAction(error) {
+  return /登录|log in|验证码|captcha|安全验证|security check|WAF|权限|permission|access denied|访问被阻止/i
+    .test(String(error?.message || error));
+}
+
 async function decomposePreview(page, config, previewFile, directionDir, index, width, height) {
   const layersFile = path.join(directionDir, "layers.json");
   const reportFile = path.join(directionDir, "layers", "decomposition-report.json");
@@ -307,18 +328,33 @@ export async function generateDirections({ page, config, runDir, references, cou
           copy: spec.copy || {}
         };
         manifest.directions = manifest.directions.filter((item) => item.index !== index).concat(entry).sort((a, b) => a.index - b.index);
+        clearDirectionFailure(manifest, index);
         await writeJsonAtomic(manifestFile, manifest);
         lastError = null;
         break;
       } catch (error) {
+        if (requiresUserAction(error)) throw error;
         lastError = error;
         console.error(`第 ${index} 套第 ${attempt + 1} 次尝试失败：${error.message}`);
         await screenshotFailure(page, path.join(directionDir, `error-attempt-${attempt + 1}.png`));
       }
     }
-    if (lastError) throw new Error(`第 ${index} 套生成失败：${lastError.message}`);
+    if (lastError) {
+      const failure = {
+        index,
+        type,
+        attempts: config.generation.maxRetries + 1,
+        message: lastError.message,
+        failedAt: new Date().toISOString()
+      };
+      recordDirectionFailure(manifest, failure);
+      await writeJsonAtomic(manifestFile, manifest);
+      console.error(`第 ${index} 套连续 ${failure.attempts} 次失败，已记录并继续下一套：${failure.message}`);
+    }
   }
 
+  manifest.failures = activeDirectionFailures(manifest);
+  await writeJsonAtomic(manifestFile, manifest);
   const learned = [...new Set(manifest.directions.flatMap((item) => item.keywords || []))].slice(0, 30);
   await writeJsonAtomic(path.join(config.outputRoot, "latest-keywords.json"), learned);
   return manifest;

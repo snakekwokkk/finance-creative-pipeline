@@ -36,7 +36,7 @@
     "brandNeutral": true,
     "analysisTimeoutMinutes": 6,
     "decompositionTimeoutMinutes": 6,
-    "imageTimeoutMinutes": 12
+    "imageTimeoutMinutes": 5
   },
   "matting": {
     "engine": "apple-vision",

@@ -3,7 +3,7 @@ import path from "node:path";
 import { appSupportDir, ensureConfig, localDate, localTime } from "./lib/config.mjs";
 import { launchPersistentBrowser, findOrOpenPage, screenshotFailure } from "./lib/browser.mjs";
 import { collectReferences } from "./lib/collector.mjs";
-import { generateDirections } from "./lib/chatgpt-web.mjs";
+import { activeDirectionFailures, generateDirections } from "./lib/chatgpt-web.mjs";
 import { appendError, ensureRun, readJson, updateRun, writeJsonAtomic } from "./lib/state.mjs";
 import { notify } from "./lib/notify.mjs";
 
@@ -42,14 +42,31 @@ try {
   const references = await collectReferences({ context, page: huaban, config, runDir, date, count: referenceCount });
   await updateRun(runFile, { status: "running", referenceCount: references.length, stages: { collection: "complete", generation: "running", decomposition: "pending", figma: "pending" } });
   const manifest = await generateDirections({ page: chatgpt, config, runDir, references, count: directionCount });
-  await updateRun(runFile, {
-    status: "awaiting_figma",
-    directionCount: manifest.directions.filter((item) => item.status === "ready").length,
-    figmaManifest: path.join(runDir, "figma-manifest.json"),
-    stages: { collection: "complete", generation: "complete", decomposition: "complete", figma: "pending" }
-  });
-  await notify("金融运营素材流水线", `本地素材和生图已完成，等待写入 Figma：${runDir}`);
-  console.log(JSON.stringify({ status: "awaiting_figma", runDir, manifest: path.join(runDir, "figma-manifest.json") }));
+  const readyCount = manifest.directions.filter((item) => item.status === "ready").length;
+  const failures = activeDirectionFailures(manifest);
+  const manifestFile = path.join(runDir, "figma-manifest.json");
+  if (failures.length) {
+    await updateRun(runFile, {
+      status: "blocked",
+      directionCount: readyCount,
+      directionFailures: failures,
+      figmaManifest: manifestFile,
+      stages: { collection: "complete", generation: "partial", decomposition: "partial", figma: "pending" }
+    });
+    await notify("金融运营素材流水线部分完成", `${readyCount}/${directionCount} 套已完成，${failures.length} 套失败；再次运行将只重试失败方向。`);
+    console.log(JSON.stringify({ status: "partial", runDir, manifest: manifestFile, readyCount, failures }));
+    process.exitCode = 1;
+  } else {
+    await updateRun(runFile, {
+      status: "awaiting_figma",
+      directionCount: readyCount,
+      directionFailures: [],
+      figmaManifest: manifestFile,
+      stages: { collection: "complete", generation: "complete", decomposition: "complete", figma: "pending" }
+    });
+    await notify("金融运营素材流水线", `本地素材和生图已完成，等待写入 Figma：${runDir}`);
+    console.log(JSON.stringify({ status: "awaiting_figma", runDir, manifest: manifestFile }));
+  }
 } catch (error) {
   if (context?.pages()?.length) await screenshotFailure(context.pages()[0], path.join(runDir, "fatal-error.png"));
   await appendError(runFile, "local_pipeline", error);

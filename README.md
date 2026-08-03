@@ -123,6 +123,7 @@ codex plugin add finance-creative-pipeline@<marketplace-name>
 | `collection.searchPlans` | 弹窗、Banner、浮窗各自的配额和搜索词列表 |
 | `generation.directionCount` | 原创方向数量 |
 | `generation.maxRetries` | 单方向最大重试次数 |
+| `generation.imageTimeoutMinutes` | 单次生图等待上限，默认 5 分钟 |
 | `matting.paddingRatio` | Apple Vision 候选区域外扩比例 |
 | `matting.minForegroundRatio` | 最小前景占比 |
 | `matting.maxForegroundRatio` | 最大前景占比 |
@@ -149,6 +150,8 @@ codex plugin add finance-creative-pipeline@<marketplace-name>
 | `blocked` | 需要用户处理登录、验证码、权限或其他外部阻塞 |
 
 恢复任务时先读取已有 `run.json` 和 `figma-manifest.json`。如果本地阶段已经完成，只继续 Figma 同步，不要重新运行采集和生成。
+
+单个方向连续三次失败后会写入 `figma-manifest.json.failures`，流水线继续生成后续方向。本轮结束仍有失败项时状态保持 `blocked`，不会同步不完整的 Figma 交付；再次运行只重试失败方向。登录失效、验证码、安全验证和权限问题仍会立即停止并通知用户。
 
 ### 输出结构
 
@@ -336,6 +339,7 @@ User configuration lives outside the repository and should never be committed:
 | `collection.searchPlans` | Type-specific quotas and queries for popup, Banner, and floating references |
 | `generation.directionCount` | Number of original directions |
 | `generation.maxRetries` | Maximum retries per direction |
+| `generation.imageTimeoutMinutes` | Maximum wait per image-generation attempt; defaults to 5 minutes |
 | `matting.paddingRatio` | Padding around Apple Vision regions of interest |
 | `matting.minForegroundRatio` | Minimum foreground ratio |
 | `matting.maxForegroundRatio` | Maximum foreground ratio |
@@ -364,6 +368,8 @@ Primary states:
 | `blocked` | Login, CAPTCHA, permissions, or another external issue requires user action |
 
 Always inspect the existing `run.json` and `figma-manifest.json` before resuming. If local generation is already complete, continue only the Figma stage.
+
+After three failed attempts, the direction is recorded in `figma-manifest.json.failures` and later directions continue. A run with remaining failures stays `blocked` and cannot enter Figma sync; the next run retries only incomplete directions. Login expiry, CAPTCHA, security checks, and permission issues still stop immediately and notify the user.
 
 ### Output Layout
 

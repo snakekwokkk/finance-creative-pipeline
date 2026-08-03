@@ -31,6 +31,8 @@ Use the deterministic local runtime for web collection, ChatGPT Web generation, 
 - Open each accepted Pin detail page and select the highest-resolution URL exposed by its visible main image through `currentSrc`, `src`, or `srcset`. Require the configured minimum width (720 px by default), retain the reference type, search query, list thumbnail URL, selected image URL, dimensions, and Pin source URL, and skip undersized Pins. Never synthesize or rewrite CDN URLs to obtain restricted originals.
 - Keep generated content brand-neutral and reject real logos, real brand names, copied copy, guaranteed approvals, fixed returns, or fabricated regulatory endorsements.
 - Resume from `run.json` and `figma-manifest.json`; never duplicate successful directions or Figma date sections.
+- Limit each image-generation attempt to five minutes by default. After three failed attempts, record the direction in `figma-manifest.json.failures` and continue generating later directions. Finish the local pass as `blocked`/partial when failures remain, never start Figma from a partial manifest, and retry only failed directions on the next run.
+- Login expiry, CAPTCHA, WAF, security checks, access denial, and permission errors are user-action blockers, not direction failures. Stop immediately and notify the user instead of retrying or skipping past them.
 - For Figma writes, load and follow `figma-use` and `figma-generate-design`; work incrementally and return every created or mutated node ID.
 - Preserve the two-up contract in Figma: `Preview` is the visible flattened design on the left, while `Editable` on the right must visibly render the reconstruction from accepted `vision-alpha-matting` rasters plus native text and vectors. Keep `Visual Base` locked but hidden as an inspection reference; never show the same flattened preview on both sides. Use `background-clean.png` behind `Editable Elements` when available, otherwise use the direction's first `spec.json` palette color as a native background. Position mattes with `assetBboxPx`, not the coarse semantic box, and never upload rejected crop substitutes.
 - Treat editable-side visual QA as a completion gate. Fix or hide duplicated background OCR, text that exceeds its declared bbox, malformed generic vector placeholders, residual text showing through translucent cards, and incorrect z-order. Do not hide `Editable Elements` to make the screenshot pass, and do not mark Figma complete while the right side is identical to the preview or visibly broken.
@@ -38,7 +40,7 @@ Use the deterministic local runtime for web collection, ChatGPT Web generation, 
 ## Recovery
 
 - If the runtime reports missing login, run setup and then rerun the same command.
-- If a direction fails, retain its screenshots and retry only that incomplete direction.
+- If a direction fails three times, retain its screenshots, continue later directions, and retry only that incomplete direction on the next run.
 - If Figma fails, do not rerun collection or generation. Resume from the existing manifest.
 - If the 10:30 run was missed, notify once and wait for explicit user approval before launching a catch-up run.
 
