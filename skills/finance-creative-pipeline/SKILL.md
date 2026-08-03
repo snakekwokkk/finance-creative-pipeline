@@ -21,15 +21,17 @@ Use the deterministic local runtime for web collection, ChatGPT Web generation, 
 - Use the persistent Chrome profile stored outside the plugin. Never export or share it.
 - Use ChatGPT Web for analysis and image generation. Do not call Codex image generation as a fallback.
 - Generate exactly one complete preview image per direction. Do not request or save a separate transparent foreground image.
-- After each preview is saved, send that generated preview back to ChatGPT Web for a decomposition-only visual review. Save normalized layer boxes, OCR copy, repair colors, confidence, and polygon masks to `layers.json`.
-- Run `node scripts/decompose-image.mjs` to create non-destructive crops and a `decomposition-report.json`. Never describe a crop as a fully isolated layer unless the report says it has a reliable mask.
+- After each preview is saved, send that generated preview back to ChatGPT Web for a decomposition-only visual review. Save semantic layer roles, normalized coarse boxes, editable types, OCR copy, repair colors, and confidence to `layers.json`. Never ask ChatGPT for polygon masks.
+- Run `node scripts/decompose-image.mjs` to use the coarse boxes only as padded regions of interest, then generate pixel-level foreground instance masks with Apple Vision. Accept only outputs with real transparency and safe boundary metrics. Never fall back to rectangular crops or LLM-authored polygon masks.
+- Require macOS 14 or later plus Xcode Command Line Tools for local matting. If Apple Vision finds no foreground or the alpha-quality gate fails, record `matting-rejected`, keep `Visual Base`, and do not upload a crop substitute.
 - Treat `decomposition-report.json` warnings and limitations as binding evidence. A single flattened PNG cannot recover pixels hidden behind text or objects.
 - Do not bypass login, CAPTCHA, WAF, download restrictions, paid assets, or security interstitials.
 - Download only visible Huaban preview images and retain their source URLs.
 - Keep generated content brand-neutral and reject real logos, real brand names, copied copy, guaranteed approvals, fixed returns, or fabricated regulatory endorsements.
 - Resume from `run.json` and `figma-manifest.json`; never duplicate successful directions or Figma date sections.
 - For Figma writes, load and follow `figma-use` and `figma-generate-design`; work incrementally and return every created or mutated node ID.
-- Preserve visual fidelity in Figma: use `Visual Base` as the visible locked composite when background cleanup is unsafe; place extracted rasters and native OCR text in `Editable Elements` for toggled editing. Only show extracted layers by default when the decomposition report confirms safe background repair.
+- Preserve the two-up contract in Figma: `Preview` is the visible flattened design on the left, while `Editable` on the right must visibly render the reconstruction from accepted `vision-alpha-matting` rasters plus native text and vectors. Keep `Visual Base` locked but hidden as an inspection reference; never show the same flattened preview on both sides. Use `background-clean.png` behind `Editable Elements` when available, otherwise use the direction's first `spec.json` palette color as a native background. Position mattes with `assetBboxPx`, not the coarse semantic box, and never upload rejected crop substitutes.
+- Treat editable-side visual QA as a completion gate. Fix or hide duplicated background OCR, text that exceeds its declared bbox, malformed generic vector placeholders, residual text showing through translucent cards, and incorrect z-order. Do not hide `Editable Elements` to make the screenshot pass, and do not mark Figma complete while the right side is identical to the preview or visibly broken.
 
 ## Recovery
 

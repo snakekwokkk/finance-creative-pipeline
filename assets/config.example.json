@@ -20,5 +20,13 @@
     "analysisTimeoutMinutes": 6,
     "decompositionTimeoutMinutes": 6,
     "imageTimeoutMinutes": 12
+  },
+  "matting": {
+    "engine": "apple-vision",
+    "paddingRatio": 0.08,
+    "minForegroundRatio": 0.005,
+    "maxForegroundRatio": 0.98,
+    "minTransparentRatio": 0.02,
+    "maxBorderForegroundRatio": 0.65
   }
 }

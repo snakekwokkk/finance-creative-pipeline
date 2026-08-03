@@ -17,7 +17,7 @@ Create one section named `YYYY-MM-DD 自动采集` on the target page, positione
 For each direction create a frame named `NN/type` containing:
 
 - `Preview`: rectangle receiving `preview.png` as an image fill.
-- `Editable`: frame containing `Visual Base`, `Editable Elements`, extracted raster crops, native OCR text, buttons, and semantic metadata. Do not redraw the whole composition from the spec.
+- `Editable`: frame containing a locked hidden `Visual Base`, an optional visible `Background Clean`, and visible `Editable Elements` made from accepted alpha-matted rasters, native OCR text, buttons, vectors, and semantic metadata. Do not redraw the whole composition from the spec and never use the flattened preview as the visible editable-side output.
 - `Sources`: small text containing the two source URLs.
 - `Keywords`: small text containing the extracted keywords.
 
@@ -27,18 +27,20 @@ Use these sizes:
 - Directions 07–08: banner, 1140 × 240.
 - Directions 09–10: float, 240 × 240.
 
-Lay direction frames in two columns with 160 px gaps. Put the preview and editable version side by side inside each direction frame.
+Lay direction frames in two columns with 160 px gaps. Put the flattened preview on the left and the visibly reconstructed editable version on the right inside each direction frame. The two sides must not render the same flattened image.
 
 ## Write sequence
 
 1. Inspect pages, fonts, existing conventions, components, variables, and styles.
 2. Create or resolve the dated section and direction wrappers in incremental `use_figma` calls. Return all IDs.
 3. Create the `Preview` and `Visual Base` rectangles before uploading images.
-4. Call `upload_assets` for `preview.png`, `background-clean.png` when present, and every extracted raster listed in the decomposition report. POST raw bytes to the returned single-use URL with the correct image content type.
-5. Build native OCR text, CTA, and simple vector icon layers from `layers.json`. Load fonts before every text mutation. Keep `Visual Base` visible and lock it when cleanup warnings remain; hide `Editable Elements` by default in that case so the screenshot stays faithful.
-6. Use semantic layer names exactly as listed above. Use auto-layout for related children.
-7. Screenshot each direction and the complete dated section. Fix missing images, clipping, overlap, wrong fonts, and placeholder text before marking the run complete.
+4. Call `upload_assets` for `preview.png`, `background-clean.png` when present, and only raster files whose `extractionMode` is `vision-alpha-matting` and whose `matting.status` is `accepted`. Position each accepted matte using `assetBboxPx`. Never upload or synthesize a rectangular crop for `matting-rejected` layers.
+5. Build native OCR text, CTA, cards, simple geometry, and vector icon layers from `layers.json`. Load fonts before every text mutation. Keep `Visual Base` locked and hidden. Show `Background Clean` plus `Editable Elements` when `background-clean.png` exists; otherwise give the `Editable` frame a native solid fill using the first color in `spec.json.palette` and show `Editable Elements`. Rejected mattes remain absent even when `editableReadiness` is `visual-base-required`.
+6. Compose the editable side in this z-order: native/clean background, dim or content masks, card and panel surfaces, accepted raster visuals and decorations, native vectors, then native text. Hide `BackgroundUI` OCR when the visible cleaned background already contains that UI copy. Add an opaque or near-opaque native card/content mask when repaired background text leaks through beneath native copy.
+7. Constrain every native text node to its declared bbox. For explicit multiline text, cap font size by both the available width and approximately `bboxHeight / (lineCount * 1.22)`; retain the source line breaks. Fix wrapping rather than allowing text to overlap adjacent rows or controls.
+8. Use semantic layer names exactly as listed above. Use auto-layout for related children. Remove or hide generic placeholders that render as bounding boxes, rectangular sparkle outlines, fake chevrons, or detached empty shapes instead of recognizable UI geometry.
+9. Screenshot each direction at a readable size and then screenshot the complete dated section. Verify that the left side is the preview and the right side is visibly editable, with no duplicated OCR, clipping, overlap, wrong fonts, washed-out hero art, malformed placeholder vectors, or blank reconstruction. Fix failures in the editable layers; never hide `Editable Elements` or reveal `Visual Base` as a QA workaround.
 
 ## Completion
 
-Run `node scripts/mark-figma-complete.mjs --date YYYY-MM-DD --section-id NODE_ID --section-name "SECTION_NAME" --direction-ids ID1,ID2 --uploaded-assets N` to record the section node ID, all direction node IDs, uploaded asset count, and `stages.figma = "complete"`. Record whether each direction is `visual_fidelity` or `editable_reconstruction` based on its decomposition report. Do not delete source files after sync.
+Run `node scripts/mark-figma-complete.mjs --date YYYY-MM-DD --section-id NODE_ID --section-name "SECTION_NAME" --direction-ids ID1,ID2 --uploaded-assets N` only after every right-side reconstruction passes the visual gate above. Record the section node ID, all direction node IDs, uploaded asset count, and `stages.figma = "complete"`. Record whether each direction is `visual_fidelity` or `editable_reconstruction` based on its decomposition report. Do not delete source files after sync.
