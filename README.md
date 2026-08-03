@@ -20,7 +20,7 @@
 
 Finance Creative Pipeline 是一个面向中国互联网金融运营素材的 Codex 插件。它通过可恢复的本地流水线完成以下工作：
 
-1. 使用持久化 Chrome 配置从花瓣采集可见参考图并保留来源链接。
+1. 使用持久化 Chrome 配置从花瓣 Pin 详情页采集高分辨率可见参考图，并保留来源链接和尺寸信息。
 2. 通过 ChatGPT 网页版分析参考图，并为每个方向生成一张品牌中性的完整预览图。
 3. 将预览图重新提交给 ChatGPT 网页版，生成语义化 `layers.json`。
 4. 使用 Apple Vision 在本地生成像素级前景蒙版，并执行透明度与边界质量检查。
@@ -35,6 +35,8 @@ Finance Creative Pipeline 是一个面向中国互联网金融运营素材的 Co
 - ChatGPT 只提供语义框和图层描述；透明边缘由 Apple Vision 在本地生成。
 - 未通过抠图质量门槛的素材不会退化为矩形裁切图，也不会上传到 Figma。
 - 流水线从 `run.json` 和 `figma-manifest.json` 恢复，避免重复采集、重复生成和重复创建 Figma 日期分区。
+- 参考图按类型采集：弹窗、Banner、浮窗分别使用匹配的关键词池和数量配额，不混用搜索词。
+- `reference-history.json` 长期记录已采集 Pin 和图片指纹；后续运行会跳过历史 Pin 和相同图片并继续滚动检索，不会误删仅仅版式相似的素材。
 - Figma 左侧始终是完整预览，右侧必须是可见的可编辑重建，禁止左右两边显示同一张扁平图。
 
 ### 环境要求
@@ -115,6 +117,10 @@ codex plugin add finance-creative-pipeline@<marketplace-name>
 | `figma.fileKey` | 目标 Figma 文件 key |
 | `figma.pageId` | 目标 Figma 页面 ID |
 | `collection.referenceCount` | 正式运行采集的参考图数量 |
+| `collection.minReferenceWidthPx` | 详情页参考图的最低像素宽度，默认 720 |
+| `collection.perKeywordLimit` | 单个搜索词最多接受的参考图数量 |
+| `collection.maxSearchScrolls` | 为寻找未采集 Pin 执行的最大滚动次数 |
+| `collection.searchPlans` | 弹窗、Banner、浮窗各自的配额和搜索词列表 |
 | `generation.directionCount` | 原创方向数量 |
 | `generation.maxRetries` | 单方向最大重试次数 |
 | `matting.paddingRatio` | Apple Vision 候选区域外扩比例 |
@@ -161,6 +167,8 @@ YYYY-MM-DD/
             ├── background-clean.png
             └── *.png
 ```
+
+输出根目录还会维护 `reference-history.json`，长期保存已接受的 Pin ID、aHash、来源、尺寸和采集日期。每日运行会先读取该台账，再向下滚动寻找未采集内容。
 
 - `preview.png`：完整、扁平化的最终预览。
 - `spec.json`：方向构图、配色、组件和文案。
@@ -212,7 +220,7 @@ npm run decompose-image -- \
 
 - 不导出、共享或提交 Chrome 持久化登录目录。
 - 不自动处理验证码、WAF、安全验证、付费限制或下载限制。
-- 只下载页面中可见的花瓣预览图，并保留原始来源 URL。
+- 只从 Pin 详情页公开可见图片元素下载预览图，并保留列表缩略图、最终图片和 Pin 来源 URL。
 - 不生成真实品牌 Logo、真实公司名称、固定收益、保证审批、监管背书或其他误导性金融承诺。
 - 不将拒绝的抠图结果伪装成透明独立素材。
 - 不提交用户配置、登录数据或每日运行产物。
@@ -225,7 +233,7 @@ npm run decompose-image -- \
 
 Finance Creative Pipeline is a Codex plugin for daily Chinese internet-finance operations creatives. It runs a resumable local workflow that:
 
-1. Collects visible Huaban references through a persistent Chrome profile and preserves source URLs.
+1. Collects higher-resolution visible references from Huaban Pin detail pages through a persistent Chrome profile, preserving source URLs and dimensions.
 2. Uses ChatGPT Web to analyze the references and generate one brand-neutral, complete preview per direction.
 3. Sends each preview back to ChatGPT Web to produce a semantic `layers.json` plan.
 4. Uses Apple Vision locally for pixel-level foreground masks and enforces alpha and boundary quality gates.
@@ -240,6 +248,8 @@ A normal run collects 20 references and generates 10 original directions: six po
 - ChatGPT provides semantic regions and layer descriptions only. Apple Vision creates transparent edges locally.
 - Failed mattes are never replaced with rectangular crops and are never uploaded to Figma.
 - Resume from `run.json` and `figma-manifest.json` to avoid duplicate collection, generation, or dated Figma sections.
+- Collect popup, Banner, and floating-window references from separate type-matched keyword pools and quotas.
+- Keep accepted Pin IDs and image fingerprints in `reference-history.json`; later runs skip historical Pins and identical images and continue scrolling, without rejecting merely similar layouts.
 - The Figma preview stays on the left. The right side must visibly render editable layers and must never duplicate the same flattened image.
 
 ### Requirements
@@ -320,6 +330,10 @@ User configuration lives outside the repository and should never be committed:
 | `figma.fileKey` | Target Figma file key |
 | `figma.pageId` | Target Figma page ID |
 | `collection.referenceCount` | Number of references in a normal run |
+| `collection.minReferenceWidthPx` | Minimum detail-image width in pixels; defaults to 720 |
+| `collection.perKeywordLimit` | Maximum accepted references from one search query |
+| `collection.maxSearchScrolls` | Maximum scroll attempts used to find unseen Pins |
+| `collection.searchPlans` | Type-specific quotas and queries for popup, Banner, and floating references |
 | `generation.directionCount` | Number of original directions |
 | `generation.maxRetries` | Maximum retries per direction |
 | `matting.paddingRatio` | Padding around Apple Vision regions of interest |
@@ -337,6 +351,8 @@ Daily artifacts are stored by default under:
 ```text
 ~/Desktop/互联网金融素材/YYYY-MM-DD/
 ```
+
+The output root also contains `reference-history.json`, a persistent ledger of accepted Pin IDs, aHashes, sources, dimensions, and collection dates. Each run reads it before scrolling for unseen results.
 
 Primary states:
 
@@ -417,7 +433,7 @@ npm run decompose-image -- \
 
 - Never export, share, or commit the persistent Chrome profile.
 - Never bypass CAPTCHA, WAF, security interstitials, paywalls, or download restrictions.
-- Download only visible Huaban previews and preserve their source URLs.
+- Download only previews exposed by visible image elements on Huaban Pin detail pages, preserving the list thumbnail, selected image, and Pin source URLs.
 - Do not generate real logos, real company names, fixed returns, guaranteed approvals, fabricated regulatory endorsements, or other misleading financial claims.
 - Never present rejected mattes as valid transparent assets.
 - Never commit user configuration, authentication data, or daily run artifacts.

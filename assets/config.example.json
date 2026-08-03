@@ -9,9 +9,26 @@
   },
   "collection": {
     "referenceCount": 20,
-    "recentDays": 30,
-    "seedKeywords": ["互联网金融", "借贷", "助贷", "小贷", "360金融", "宜信", "度小满", "宜享花", "洋钱罐", "马上消费金融", "支付宝"],
-    "formatKeywords": ["弹窗", "Banner", "悬浮飘窗", "浮窗", "运营活动", "Icon"]
+    "minReferenceWidthPx": 720,
+    "perKeywordLimit": 2,
+    "maxSearchScrolls": 20,
+    "searchPlans": [
+      {
+        "type": "popup",
+        "count": 12,
+        "keywords": ["互联网金融 弹窗", "借贷 活动弹窗", "助贷 营销弹窗", "贷款 优惠券弹窗", "金融 福利弹窗", "借款 结果弹窗", "金融 App 弹窗", "贷款 运营弹窗"]
+      },
+      {
+        "type": "banner",
+        "count": 4,
+        "keywords": ["互联网金融 Banner", "借贷 活动 Banner", "金融 App 横幅", "贷款 运营 Banner", "金融 营销横幅", "借款 福利 Banner"]
+      },
+      {
+        "type": "float",
+        "count": 4,
+        "keywords": ["互联网金融 浮窗", "借贷 悬浮窗", "金融 App 悬浮飘窗", "贷款 活动浮标", "金融 运营浮窗", "借款 悬浮入口"]
+      }
+    ]
   },
   "generation": {
     "directionCount": 10,

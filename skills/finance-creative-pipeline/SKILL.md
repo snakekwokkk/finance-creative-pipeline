@@ -26,7 +26,9 @@ Use the deterministic local runtime for web collection, ChatGPT Web generation, 
 - Require macOS 14 or later plus Xcode Command Line Tools for local matting. If Apple Vision finds no foreground or the alpha-quality gate fails, record `matting-rejected`, keep `Visual Base`, and do not upload a crop substitute.
 - Treat `decomposition-report.json` warnings and limitations as binding evidence. A single flattened PNG cannot recover pixels hidden behind text or objects.
 - Do not bypass login, CAPTCHA, WAF, download restrictions, paid assets, or security interstitials.
-- Download only visible Huaban preview images and retain their source URLs.
+- Collect references through type-specific search plans: 12 popup references for six popup directions, four Banner references for two Banner directions, and four floating-window references for two floating directions. Rotate through several matching keywords with a per-keyword cap; never use popup queries as Banner or floating-window sources.
+- Before downloading, reject Pin IDs recorded in the persistent `reference-history.json` ledger and scroll deeper for unseen results. After download, reject only the same image: an identical SHA-256, or an identical aHash with a matching aspect ratio. Do not reject merely similar compositions or templates.
+- Open each accepted Pin detail page and select the highest-resolution URL exposed by its visible main image through `currentSrc`, `src`, or `srcset`. Require the configured minimum width (720 px by default), retain the reference type, search query, list thumbnail URL, selected image URL, dimensions, and Pin source URL, and skip undersized Pins. Never synthesize or rewrite CDN URLs to obtain restricted originals.
 - Keep generated content brand-neutral and reject real logos, real brand names, copied copy, guaranteed approvals, fixed returns, or fabricated regulatory endorsements.
 - Resume from `run.json` and `figma-manifest.json`; never duplicate successful directions or Figma date sections.
 - For Figma writes, load and follow `figma-use` and `figma-generate-design`; work incrementally and return every created or mutated node ID.

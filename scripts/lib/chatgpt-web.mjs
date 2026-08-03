@@ -216,6 +216,13 @@ function decompositionPrompt(index, width, height) {
   return `你是一名负责UI拆图和审图的视觉分析师。下面上传的是刚生成的第${index}套完整运营设计图，画布为 ${width}x${height}。请只分析这张图，不要生成新图片。目标是生成可由像素级抠图和Figma原生图层重组的语义计划。\n\n识别背景、卡片、主视觉素材、插画、角标、徽章、Icon、装饰、按钮和所有可编辑文字。每个图层输出归一化0到1的bbox（x,y,width,height），bbox应完整包住当前可见对象并尽量排除相邻对象。不要输出polygon或mask points：边缘由本地像素级前景分割生成。editable只能是background、raster、vector或text；照片、复杂插画和复杂装饰用raster，简单卡片、按钮、几何图形和可重建Icon用vector。文字必须输出原文、字体气质、字号相对等级、颜色、对齐和安全的背景修复颜色；如果文字背后有渐变、纹理或复杂素材，repair.type必须是none。\n\n只输出以下标记包裹的合法JSON，不要解释：\nDECOMPOSE_START\n{\n  "schemaVersion": 2,\n  "canvas": {"width": ${width}, "height": ${height}},\n  "layers": [\n    {\n      "id": "background",\n      "role": "Background",\n      "kind": "background",\n      "bbox": {"x": 0, "y": 0, "width": 1, "height": 1},\n      "editable": "background",\n      "confidence": 0.98\n    },\n    {\n      "id": "hero",\n      "role": "Visual/Hero",\n      "kind": "illustration",\n      "bbox": {"x": 0.18, "y": 0.2, "width": 0.64, "height": 0.45},\n      "editable": "raster",\n      "confidence": 0.9\n    },\n    {\n      "id": "title",\n      "role": "Copy/Title",\n      "kind": "text",\n      "bbox": {"x": 0.2, "y": 0.7, "width": 0.6, "height": 0.08},\n      "text": "图中原文",\n      "typography": {"sizeLevel": "large", "weight": "bold", "color": "#000000", "align": "center"},\n      "repair": {"type": "solid", "color": "#FFFFFF"},\n      "editable": "text",\n      "confidence": 0.9\n    }\n  ]\n}\nDECOMPOSE_END\n\n不要改写图中文字，不要补充看不清的文案，不要输出多边形蒙版，不要把一整张图标成单一插画层。`;
 }
 
+export function selectReferencePair(references, type, typeIndex) {
+  const typed = references.filter((item) => item.referenceType === type);
+  const pool = typed.length >= 2 ? typed : references;
+  if (pool.length < 2) throw new Error(`${type} 类型至少需要两张参考图`);
+  return [pool[(typeIndex * 2) % pool.length], pool[(typeIndex * 2 + 1) % pool.length]];
+}
+
 async function decomposePreview(page, config, previewFile, directionDir, index, width, height) {
   const layersFile = path.join(directionDir, "layers.json");
   const reportFile = path.join(directionDir, "layers", "decomposition-report.json");
@@ -261,8 +268,9 @@ export async function generateDirections({ page, config, runDir, references, cou
     const existingReport = await readJson(path.join(directionDir, "layers", "decomposition-report.json"));
     if (existing && existingLayers?.schemaVersion >= 2 && existingLayers.layers?.length && existingReport?.schemaVersion >= 2) continue;
     let cachedSpec = await readJson(specFile);
-    const pair = [references[(zero * 2) % references.length], references[(zero * 2 + 1) % references.length]];
     const type = index <= 6 ? "popup" : index <= 8 ? "banner" : "float";
+    const typeIndex = type === "popup" ? index - 1 : type === "banner" ? index - 7 : index - 9;
+    const pair = selectReferencePair(references, type, typeIndex);
     const size = type === "popup" ? { width: 1002, height: 1335 } : type === "banner" ? { width: 1140, height: 240 } : { width: 240, height: 240 };
     let lastError;
 
