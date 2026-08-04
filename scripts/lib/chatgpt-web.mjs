@@ -111,6 +111,62 @@ export function conversationUrl(value) {
   }
 }
 
+export function directionChatTitle(type, typeIndex) {
+  const prefix = { popup: "弹窗", banner: "Banner", float: "浮窗" }[type];
+  if (!prefix) throw new Error(`不支持的方向类型：${type}`);
+  return `${prefix}${typeIndex + 1}`;
+}
+
+function conversationId(value) {
+  try { return new URL(value).pathname.match(/\/c\/([^/]+)/)?.[1] || null; }
+  catch { return null; }
+}
+
+export async function ensureDirectionChatTitle(page, project, chatUrl, title) {
+  const id = conversationId(chatUrl);
+  if (!project?.enabled || !id) throw new Error(`无法将 ChatGPT 方向聊天命名为“${title}”：缺少有效的项目或聊天 URL`);
+  let renameError;
+  try {
+    await navigateWithRetry(page, project.url);
+    const selector = `[data-testid="project-conversation-overflow-menu"] button[data-conversation-options-trigger="${id}"]`;
+    const started = Date.now();
+    let trigger;
+    while (Date.now() - started < 30_000) {
+      const candidates = page.locator(selector);
+      if (await candidates.count()) {
+        trigger = candidates.last();
+        if (await trigger.isVisible().catch(() => false)) break;
+      }
+      trigger = null;
+      await page.waitForTimeout(500);
+    }
+    if (!trigger) throw new Error("未在日期项目中找到对应的方向聊天");
+    if (!(await trigger.getAttribute("aria-label") || "").includes(`“${title}”`)) {
+      await trigger.click();
+      const rename = page.getByRole("menuitem", { name: /重命名|Rename/i });
+      if (!(await rename.count())) throw new Error("未找到聊天重命名菜单项");
+      await rename.last().click();
+      const editor = page.locator('input[name="title-editor"][aria-label]');
+      await editor.last().waitFor({ state: "visible", timeout: 10_000 })
+        .catch(() => { throw new Error("未找到聊天标题输入框"); });
+      await editor.last().fill(title);
+      await editor.last().press("Enter");
+      await page.waitForFunction(
+        ({ selector: target, expected }) => [...document.querySelectorAll(target)]
+          .some((button) => (button.getAttribute("aria-label") || "").includes(`“${expected}”`)),
+        { selector, expected: title },
+        { timeout: 15_000 }
+      );
+    }
+  } catch (error) {
+    renameError = error;
+  }
+  try { await navigateWithRetry(page, chatUrl); }
+  catch (error) { throw new Error(`聊天“${title}”重命名后无法返回原对话：${error.message}`); }
+  if (renameError) throw new Error(`无法将 ChatGPT 方向聊天命名为“${title}”：${renameError.message}`);
+  return { title, chatUrl };
+}
+
 async function expandProjects(page) {
   const candidates = page.locator('button[aria-expanded]');
   const count = await candidates.count();
@@ -212,16 +268,107 @@ export async function openDirectionChat(page, project, savedChatUrl = null) {
   }
 }
 
-async function attachFiles(page, files) {
-  let input = page.locator('input[type="file"]');
-  if (!(await input.count())) {
-    const attach = page.getByRole("button", { name: /attach|添加|上传|附件/i });
-    if (await attach.count()) await attach.first().click();
-    input = page.locator('input[type="file"]');
+const attachmentRemovalSelector = [
+  'button[aria-label^="移除文件"]',
+  'button[aria-label^="Remove file"]',
+  'button[aria-label*="移除文件"]',
+  'button[aria-label*="Remove file"]'
+].join(",");
+
+export function attachmentDeliveryStatus({ files, removalLabels = [], imageCount = 0, sendEnabled = false, failureText = "" }) {
+  const expectedNames = files.map((file) => path.basename(file));
+  const matchedNames = expectedNames.filter((name) => removalLabels.some((label) => label.includes(name)));
+  const failed = /上传失败|无法上传|文件处理失败|upload failed|could not upload|failed to upload/i.test(failureText);
+  return {
+    ready: !failed && matchedNames.length === expectedNames.length && imageCount >= expectedNames.length && sendEnabled,
+    failed,
+    expectedNames,
+    matchedNames,
+    imageCount,
+    sendEnabled
+  };
+}
+
+export function assistantReportsMissingReferenceImages(text) {
+  return /(?:看不到|未看到|没有收到|无法访问|未上传|没有上传).{0,30}(?:参考图|图片|图像)|(?:reference images?|uploaded images?).{0,30}(?:missing|not (?:attached|uploaded|available)|can(?:not|'t) see|do not see|don't see)|(?:can(?:not|'t) see|do not see|don't see).{0,30}(?:reference images?|uploaded images?)/i
+    .test(String(text || ""));
+}
+
+export function referenceAnalysisReceiptValid(receipt, files) {
+  if (!receipt?.analysisAcceptedAt || !Array.isArray(receipt.files)) return false;
+  const expected = files.map((file) => path.basename(file)).sort();
+  return JSON.stringify([...receipt.files].sort()) === JSON.stringify(expected);
+}
+
+async function composerForm(page) {
+  const form = page.locator('form[data-type="unified-composer"]');
+  if (!(await form.count())) throw new Error("未找到 ChatGPT 统一输入区域，无法验证图片附件");
+  return form.first();
+}
+
+async function clearComposerAttachments(page) {
+  const form = await composerForm(page);
+  for (let remaining = await form.locator(attachmentRemovalSelector).count(); remaining > 0; remaining -= 1) {
+    await form.locator(attachmentRemovalSelector).first().click();
+    await page.waitForTimeout(150);
   }
-  if (!(await input.count())) throw new Error("未找到 ChatGPT 文件上传控件");
-  await input.first().setInputFiles(files);
-  await page.waitForTimeout(1500);
+}
+
+async function attachmentSnapshot(page, files) {
+  const form = await composerForm(page);
+  const removalLabels = await form.locator(attachmentRemovalSelector).evaluateAll((buttons) => buttons
+    .map((button) => button.getAttribute("aria-label") || "")
+    .filter(Boolean));
+  const imageCount = await form.locator('img[src^="blob:"]').count();
+  const sendButtons = form.locator('[data-testid="send-button"], button[aria-label*="发送"], button[aria-label*="Send"]');
+  let sendEnabled = false;
+  for (let index = 0; index < await sendButtons.count(); index += 1) {
+    const button = sendButtons.nth(index);
+    if (await button.isVisible().catch(() => false) && await button.isEnabled().catch(() => false)) {
+      sendEnabled = true;
+      break;
+    }
+  }
+  const alerts = await page.locator('[role="alert"]').allInnerTexts().catch(() => []);
+  const failureText = `${await form.innerText().catch(() => "")}\n${alerts.join("\n")}`;
+  return attachmentDeliveryStatus({ files, removalLabels, imageCount, sendEnabled, failureText });
+}
+
+async function attachFiles(page, files) {
+  await clearComposerAttachments(page);
+  const candidates = [
+    page.locator('input[data-testid="upload-photos-input"]'),
+    page.locator("#upload-photos"),
+    page.locator('input[type="file"][accept*="image"]:not([capture])')
+  ];
+  let input = null;
+  for (const candidate of candidates) {
+    if (await candidate.count()) {
+      input = candidate.first();
+      break;
+    }
+  }
+  if (!input) throw new Error("未找到 ChatGPT 图片专用上传控件，已停止以避免无参考图生成");
+  await input.setInputFiles(files);
+  const selectedCount = await input.evaluate((element) => element.files?.length || 0);
+  if (selectedCount !== files.length) {
+    throw new Error(`ChatGPT 图片选择数量不正确：需要 ${files.length} 张，实际 ${selectedCount} 张`);
+  }
+
+  const started = Date.now();
+  let latest;
+  while (Date.now() - started < 60_000) {
+    latest = await attachmentSnapshot(page, files);
+    if (latest.failed) throw new Error(`ChatGPT 图片附件上传失败：${latest.expectedNames.join("、")}`);
+    if (latest.ready) {
+      await page.waitForTimeout(500);
+      const stable = await attachmentSnapshot(page, files);
+      if (stable.ready) return stable;
+    }
+    await page.waitForTimeout(500);
+  }
+  const missing = latest?.expectedNames?.filter((name) => !latest.matchedNames.includes(name)) || files.map(path.basename);
+  throw new Error(`等待 ChatGPT 图片附件就绪超时：${missing.join("、")}`);
 }
 
 async function sendPrompt(page, prompt) {
@@ -493,6 +640,9 @@ export async function decomposePreview(page, config, previewFile, directionDir, 
   if (!layers) {
     let analysis = await sendAndRead(page, decompositionPrompt(index, width, height, maxAssets, type), minuteTimeout(decompositionTimeout));
     await onConversationReady();
+    if (assistantReportsMissingReferenceImages(analysis.text)) {
+      throw new Error("ChatGPT 明确表示未收到完整预览图片，已停止本次拆解并等待重新上传");
+    }
     const analysisFile = path.join(directionDir, "decomposition-analysis.txt");
     await fs.writeFile(analysisFile, analysis.text, "utf8");
     let parsed;
@@ -598,7 +748,12 @@ export async function generateDirections({
     const typeIndex = directionTypes
       ? directionTypes.slice(0, zero).filter((candidate) => candidate === type).length
       : type === "popup" ? index - 1 : type === "banner" ? index - 7 : index - 9;
+    const chatTitle = directionChatTitle(type, typeIndex);
     const pair = selectReferencePair(references, type, typeIndex);
+    const referenceFiles = pair.map((item) => item.file);
+    const attachmentReceiptFile = path.join(directionDir, "reference-attachments.json");
+    let attachmentReceipt = await readJson(attachmentReceiptFile);
+    if (cachedSpec && !referenceAnalysisReceiptValid(attachmentReceipt, referenceFiles)) cachedSpec = null;
     const size = type === "popup" ? { width: 1002, height: 1335 } : type === "banner" ? { width: 1140, height: 240 } : { width: 240, height: 240 };
     let lastError;
     const savedChat = manifest.directionChats[String(index)]?.url
@@ -608,31 +763,51 @@ export async function generateDirections({
     const rememberConversation = async () => {
       const url = conversationUrl(page.url());
       if (!url) return null;
-      const previous = manifest.directionChats[String(index)];
-      if (previous?.url === url) return url;
-      manifest.directionChats[String(index)] = {
-        url,
-        projectUrl: project.url,
-        updatedAt: new Date().toISOString()
-      };
-      await writeJsonAtomic(manifestFile, manifest);
+      let previous = manifest.directionChats[String(index)];
+      if (previous?.url !== url) {
+        previous = { url, projectUrl: project.url, updatedAt: new Date().toISOString() };
+        manifest.directionChats[String(index)] = previous;
+        await writeJsonAtomic(manifestFile, manifest);
+      }
+      if (previous.title !== chatTitle) {
+        await ensureDirectionChatTitle(page, project, url, chatTitle);
+        manifest.directionChats[String(index)] = {
+          ...manifest.directionChats[String(index)],
+          title: chatTitle,
+          renamedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        };
+        await writeJsonAtomic(manifestFile, manifest);
+      }
       return url;
     };
 
     for (let attempt = 0; attempt <= config.generation.maxRetries; attempt += 1) {
       try {
         if (!referencesAttached) {
-          await attachFiles(page, pair.map((item) => item.file));
+          const attachment = await attachFiles(page, referenceFiles);
+          attachmentReceipt = {
+            files: attachment.expectedNames,
+            verifiedAt: new Date().toISOString(),
+            analysisAcceptedAt: null
+          };
+          await writeJsonAtomic(attachmentReceiptFile, attachmentReceipt);
           referencesAttached = true;
         }
         let spec = cachedSpec;
         if (!spec) {
           const analysis = await sendAndRead(page, analysisPrompt(index, type), minuteTimeout(config.generation.analysisTimeoutMinutes));
           await rememberConversation();
+          if (assistantReportsMissingReferenceImages(analysis.text)) {
+            referencesAttached = false;
+            throw new Error("ChatGPT 明确表示未收到两张参考图，下一次尝试将重新上传");
+          }
           spec = extractJson(analysis.text);
           cachedSpec = spec;
           await fs.writeFile(path.join(directionDir, "analysis.txt"), analysis.text, "utf8");
           await writeJsonAtomic(specFile, spec);
+          attachmentReceipt = { ...attachmentReceipt, analysisAcceptedAt: new Date().toISOString() };
+          await writeJsonAtomic(attachmentReceiptFile, attachmentReceipt);
         }
 
         const previewFile = path.join(directionDir, "preview.png");
@@ -655,6 +830,7 @@ export async function generateDirections({
           layerCount: Array.isArray(layers.layers) ? layers.layers.length : 0,
           sourceUrls: pair.map((item) => item.sourceUrl),
           chatUrl,
+          chatTitle,
           keywords: spec.keywords || [],
           copy: spec.copy || {}
         };
@@ -665,6 +841,7 @@ export async function generateDirections({
         break;
       } catch (error) {
         if (requiresUserAction(error)) throw error;
+        if (/参考图|图片附件|图片选择数量/.test(error.message)) referencesAttached = false;
         await rememberConversation().catch(() => {});
         lastError = error;
         console.error(`第 ${index} 套第 ${attempt + 1} 次尝试失败：${error.message}`);
@@ -678,6 +855,7 @@ export async function generateDirections({
         attempts: config.generation.maxRetries + 1,
         message: lastError.message,
         chatUrl: manifest.directionChats[String(index)]?.url || null,
+        chatTitle,
         failedAt: new Date().toISOString()
       };
       recordDirectionFailure(manifest, failure);

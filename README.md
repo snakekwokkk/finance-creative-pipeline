@@ -40,8 +40,10 @@ Finance Creative Pipeline 是一个面向中国互联网金融运营素材的 Co
 - 本地只裁掉透明空白并执行 Alpha 与边界质量检查，不会推断前景蒙版。
 - 没有真实 Alpha、带底色、内容为空或触碰图片边界的素材会被拒绝，也不会上传到 Figma。
 - 每个运行日期只使用一个名为 `金融运营素材 YYYY-MM-DD` 的 ChatGPT 项目，每个设计方向只使用一个聊天。项目 URL 和方向聊天 URL 都会写入清单，失败重试或断点恢复时继续原聊天，不会为拆图或单个素材另外新建聊天。
+- 项目内聊天会显式命名为 `弹窗1` 至 `弹窗6`、`Banner1` 至 `Banner2`、`浮窗1` 至 `浮窗2`；编号在各素材类型内独立计算，验证运行中的每个类型从 1 开始。
+- 参考图使用 ChatGPT 图片专用上传控件；只有两张附件的文件名、缩略图和发送状态全部验证通过后才发送分析提示词。若 ChatGPT 回复未收到图片，流水线会清理草稿并重新上传，不会继续无图生图。
 - 流水线从 `run.json` 和 `figma-manifest.json` 恢复，避免重复采集、重复生成和重复创建 Figma 日期分区。
-- 参考图按类型采集：弹窗、Banner、浮窗分别使用匹配的关键词池和数量配额，不混用搜索词。
+- 参考图按类型采集：弹窗、Banner、浮窗分别使用匹配的关键词池和数量配额，不混用搜索词。Banner 词库使用 `金融banner`、`理财banner`、`投资理财banner` 等金融垂类词，优先寻找结构简洁的横向设计；浮窗词库使用 `浮窗`、`小浮窗`、`悬浮窗素材` 等形态词，并排除明显的完整手机页面。
 - `reference-history.json` 长期记录已采集 Pin 和图片指纹；后续运行会跳过历史 Pin 和相同图片并继续滚动检索，不会误删仅仅版式相似的素材。
 - Figma 左侧始终是完整预览，右侧必须是可见的可编辑重建，禁止左右两边显示同一张扁平图。
 
@@ -82,7 +84,7 @@ cp assets/config.example.json \
 npm run setup
 ```
 
-Chrome 会以持久化配置打开。请在可见窗口中手动完成花瓣和 ChatGPT 登录。遇到验证码、安全验证或权限确认时必须由用户处理，流水线不会绕过安全限制。
+登录设置会强制打开带持久化配置的可见 Chrome 窗口，请手动完成花瓣和 ChatGPT 登录。除此之外，测试、正式、定时和断点恢复运行均默认使用后台无窗口模式，不会抢占当前输入焦点。遇到验证码、安全验证或权限确认时会停止并通知用户，流水线不会绕过安全限制。
 
 先运行小规模测试：
 
@@ -116,12 +118,14 @@ codex plugin add finance-creative-pipeline@<marketplace-name>
 | `chromeExecutable` | Chrome 可执行文件路径 |
 | `profileDirectory` | 持久化登录配置目录 |
 | `outputRoot` | 每日运行产物根目录 |
+| `browser.headless` | 正式流水线是否后台无窗口运行，默认 `true`；登录设置始终可见 |
 | `figma.fileKey` | 目标 Figma 文件 key |
 | `figma.pageId` | 目标 Figma 页面 ID |
 | `collection.referenceCount` | 正式运行采集的参考图数量 |
 | `collection.minReferenceWidthPx` | 详情页参考图的最低像素宽度，默认 720 |
 | `collection.perKeywordLimit` | 单个搜索词最多接受的参考图数量 |
 | `collection.maxSearchScrolls` | 为寻找未采集 Pin 执行的最大滚动次数 |
+| `collection.maxFloatHeightToWidthRatio` | 浮窗参考图允许的最大高宽比，默认 2；用于排除完整手机页面 |
 | `collection.searchPlans` | 弹窗、Banner、浮窗各自的配额和搜索词列表 |
 | `generation.directionCount` | 原创方向数量 |
 | `generation.maxRetries` | 单方向最大重试次数 |
@@ -212,6 +216,7 @@ npm run test-three-types # 弹窗、Banner、浮窗各 1 个的隔离验证运�
 npm run test-transparent-assets -- --image /path/to/preview.png # 只测试透明素材拆分
 npm run find-remix-icon -- --query "shield check" --style line # 检索 Remix Icon SVG
 npm run run            # 20 张参考图、10 个方向的正式运行
+npm run run -- --visible # 仅调试时临时显示专用 Chrome
 npm run check-missed   # 检查漏跑
 npm run check          # 运行语法检查和自动化测试
 ```
@@ -255,8 +260,10 @@ A normal run collects 20 references and generates 10 original directions: six po
 - Local processing only trims transparent margins and validates Alpha and image boundaries.
 - Opaque, colored-background, empty, or boundary-touching assets are rejected and never uploaded to Figma.
 - Each run date uses one ChatGPT project named `金融运营素材 YYYY-MM-DD`, with exactly one chat per design direction. Project and direction-chat URLs are persisted so retries and resumed runs continue the original chat instead of creating decomposition or per-asset chats.
+- Project chats are explicitly renamed with type-local numbering: `弹窗1`–`弹窗6`, `Banner1`–`Banner2`, and `浮窗1`–`浮窗2`. Isolated validation runs start each included type at 1 instead of using the global direction index.
+- Reference images use ChatGPT's image-specific upload input. The analysis prompt is sent only after every expected filename, image thumbnail, and send-ready state is verified. If ChatGPT reports missing images, the composer is cleared and all references are uploaded again instead of continuing without visual references.
 - Resume from `run.json` and `figma-manifest.json` to avoid duplicate collection, generation, or dated Figma sections.
-- Collect popup, Banner, and floating-window references from separate type-matched keyword pools and quotas.
+- Collect popup, Banner, and floating-window references from separate type-matched keyword pools and quotas. Banner queries use finance-specific terms such as `金融banner`, `理财banner`, and `投资理财banner`, favoring simple horizontal compositions. Floating references use form-specific terms such as `浮窗`, `小浮窗`, and `悬浮窗素材`, while obvious full phone screens are rejected.
 - Keep accepted Pin IDs and image fingerprints in `reference-history.json`; later runs skip historical Pins and identical images and continue scrolling, without rejecting merely similar layouts.
 - The Figma preview stays on the left. The right side must visibly render editable layers and must never duplicate the same flattened image.
 
@@ -297,7 +304,7 @@ For first use or expired sessions:
 npm run setup
 ```
 
-Chrome opens with a persistent profile. Complete Huaban and ChatGPT authentication manually in the visible window. CAPTCHA, security checks, and permission prompts require user action and are never bypassed.
+Login setup forces a visible Chrome window with the persistent profile so Huaban and ChatGPT authentication can be completed manually. Test, normal, scheduled, and resumed runs are otherwise headless by default and do not steal keyboard focus. CAPTCHA, security checks, and permission prompts stop the run and require user action; they are never bypassed.
 
 Run the small test first:
 
@@ -331,12 +338,14 @@ User configuration lives outside the repository and should never be committed:
 | `chromeExecutable` | Chrome executable path |
 | `profileDirectory` | Persistent login profile directory |
 | `outputRoot` | Root directory for daily artifacts |
+| `browser.headless` | Run the normal pipeline without a visible browser window; defaults to `true`, while login setup always remains visible |
 | `figma.fileKey` | Target Figma file key |
 | `figma.pageId` | Target Figma page ID |
 | `collection.referenceCount` | Number of references in a normal run |
 | `collection.minReferenceWidthPx` | Minimum detail-image width in pixels; defaults to 720 |
 | `collection.perKeywordLimit` | Maximum accepted references from one search query |
 | `collection.maxSearchScrolls` | Maximum scroll attempts used to find unseen Pins |
+| `collection.maxFloatHeightToWidthRatio` | Maximum float-reference height-to-width ratio; defaults to 2 to reject full phone screens |
 | `collection.searchPlans` | Type-specific quotas and queries for popup, Banner, and floating references |
 | `generation.directionCount` | Number of original directions |
 | `generation.maxRetries` | Maximum retries per direction |
@@ -427,6 +436,7 @@ npm run test-three-types # Isolated validation with one popup, Banner, and float
 npm run test-transparent-assets -- --image /path/to/preview.png # Test transparent separation only
 npm run find-remix-icon -- --query "shield check" --style line # Search Remix Icon SVGs
 npm run run            # Normal 20-reference, 10-direction run
+npm run run -- --visible # Temporarily show the dedicated Chrome for debugging only
 npm run check-missed   # Check for a missed scheduled run
 npm run check          # Run syntax checks and automated tests
 ```

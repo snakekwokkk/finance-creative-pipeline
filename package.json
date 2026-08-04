@@ -1,7 +1,7 @@
 {
   "name": "finance-creative-pipeline-runtime",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "setup": "node scripts/setup-login.mjs",
@@ -12,7 +12,7 @@
     "find-remix-icon": "node scripts/find-remix-icon.mjs",
     "check-missed": "node scripts/check-missed.mjs",
     "mark-figma-complete": "node scripts/mark-figma-complete.mjs",
-    "check": "node --check scripts/run.mjs && node --check scripts/setup-login.mjs && node --check scripts/check-missed.mjs && node --check scripts/mark-figma-complete.mjs && node --check scripts/test-transparent-assets.mjs && node --check scripts/find-remix-icon.mjs && node --check scripts/lib/transparent-assets.mjs && node --check scripts/lib/remix-icons.mjs && node --check scripts/lib/collector.mjs && node --check scripts/lib/chatgpt-web.mjs && node --test scripts/lib/collector.test.mjs scripts/lib/chatgpt-web.test.mjs scripts/lib/transparent-assets.test.mjs scripts/lib/remix-icons.test.mjs"
+    "check": "node --check scripts/run.mjs && node --check scripts/setup-login.mjs && node --check scripts/check-missed.mjs && node --check scripts/mark-figma-complete.mjs && node --check scripts/test-transparent-assets.mjs && node --check scripts/find-remix-icon.mjs && node --check scripts/lib/browser.mjs && node --check scripts/lib/transparent-assets.mjs && node --check scripts/lib/remix-icons.mjs && node --check scripts/lib/collector.mjs && node --check scripts/lib/chatgpt-web.mjs && node --test scripts/lib/browser.test.mjs scripts/lib/collector.test.mjs scripts/lib/chatgpt-web.test.mjs scripts/lib/transparent-assets.test.mjs scripts/lib/remix-icons.test.mjs"
   },
   "dependencies": {
     "playwright-core": "^1.54.2",

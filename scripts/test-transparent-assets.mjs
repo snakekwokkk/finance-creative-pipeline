@@ -18,6 +18,7 @@ if (!imageFile) {
 const previewFile = path.resolve(imageFile);
 const outputDir = path.resolve(value("--out") || path.join(path.dirname(previewFile), "transparent-assets-test"));
 const directionIndex = Number(value("--index") || 1);
+const visibleMode = process.argv.includes("--visible");
 const metadata = await sharp(previewFile).metadata();
 if (!metadata.width || !metadata.height) throw new Error("无法读取测试预览图尺寸");
 await fs.mkdir(outputDir, { recursive: true });
@@ -26,7 +27,7 @@ const config = await ensureConfig();
 let context;
 let page;
 try {
-  context = await launchPersistentBrowser(config);
+  context = await launchPersistentBrowser(config, { forceVisible: visibleMode });
   page = await findOrOpenPage(context, "https://chatgpt.com", "https://chatgpt.com/");
   const project = await ensureDailyProject(page, config, localDate(config.timezone));
   await openDirectionChat(page, project);

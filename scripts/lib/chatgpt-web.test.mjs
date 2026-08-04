@@ -3,18 +3,56 @@ import test from "node:test";
 import {
   activeDirectionFailures,
   analysisPrompt,
+  assistantReportsMissingReferenceImages,
+  attachmentDeliveryStatus,
   clearDirectionFailure,
   conversationUrl,
   dailyProjectName,
   decompositionPrompt,
+  directionChatTitle,
   previewPrompt,
   projectBaseUrl,
   recordDirectionFailure,
+  referenceAnalysisReceiptValid,
   requiresUserAction,
   separateAssetCorrectionPrompt,
   separateAssetPrompt,
   selectReferencePair
 } from "./chatgpt-web.mjs";
+
+test("reference uploads are accepted only after every image attachment is visibly ready", () => {
+  const files = ["/tmp/01-popup.webp", "/tmp/02-popup.webp"];
+  assert.equal(attachmentDeliveryStatus({
+    files,
+    removalLabels: ["移除文件1：01-popup.webp", "移除文件2：02-popup.webp"],
+    imageCount: 2,
+    sendEnabled: true
+  }).ready, true);
+  assert.equal(attachmentDeliveryStatus({
+    files,
+    removalLabels: [],
+    imageCount: 0,
+    sendEnabled: true
+  }).ready, false);
+  assert.equal(attachmentDeliveryStatus({
+    files,
+    removalLabels: ["Remove file 1: 01-popup.webp", "Remove file 2: 02-popup.webp"],
+    imageCount: 2,
+    sendEnabled: false
+  }).ready, false);
+});
+
+test("missing-reference replies force a verified re-upload and old specs need a receipt", () => {
+  assert.equal(assistantReportsMissingReferenceImages("我目前看不到所说的两张参考图，请重新上传。"), true);
+  assert.equal(assistantReportsMissingReferenceImages("I cannot see the uploaded reference images."), true);
+  assert.equal(assistantReportsMissingReferenceImages("已分析两张参考图，下面输出设计规格。"), false);
+  const files = ["/tmp/01-popup.webp", "/tmp/02-popup.webp"];
+  assert.equal(referenceAnalysisReceiptValid({
+    files: ["01-popup.webp", "02-popup.webp"],
+    analysisAcceptedAt: "2026-08-04T08:00:00.000Z"
+  }, files), true);
+  assert.equal(referenceAnalysisReceiptValid({ files: ["01-popup.webp", "02-popup.webp"] }, files), false);
+});
 
 test("daily ChatGPT projects and direction chat URLs are deterministic", () => {
   assert.equal(dailyProjectName({}, "2026-08-04"), "金融运营素材 2026-08-04");
@@ -28,6 +66,16 @@ test("daily ChatGPT projects and direction chat URLs are deterministic", () => {
   assert.equal(projectBaseUrl(chatUrl), "https://chatgpt.com/g/g-p-abc-finance");
   assert.equal(conversationUrl(chatUrl), "https://chatgpt.com/g/g-p-abc-finance/c/conversation-id");
   assert.equal(conversationUrl(projectUrl), null);
+});
+
+test("direction chats use type-local numbering instead of global direction numbers", () => {
+  assert.equal(directionChatTitle("popup", 0), "弹窗1");
+  assert.equal(directionChatTitle("popup", 5), "弹窗6");
+  assert.equal(directionChatTitle("banner", 0), "Banner1");
+  assert.equal(directionChatTitle("banner", 1), "Banner2");
+  assert.equal(directionChatTitle("float", 0), "浮窗1");
+  assert.equal(directionChatTitle("float", 1), "浮窗2");
+  assert.throws(() => directionChatTitle("unknown", 0), /不支持的方向类型/);
 });
 
 test("popup prompts generate and decompose only the popup body", () => {

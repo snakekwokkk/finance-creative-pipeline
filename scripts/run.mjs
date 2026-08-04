@@ -9,6 +9,7 @@ import { notify } from "./lib/notify.mjs";
 
 const testMode = process.argv.includes("--test");
 const scheduledMode = process.argv.includes("--scheduled");
+const visibleMode = process.argv.includes("--visible");
 const typesIndex = process.argv.indexOf("--types");
 const requestedTypes = typesIndex >= 0
   ? String(process.argv[typesIndex + 1] || "").split(",").map((item) => item.trim().toLowerCase()).filter(Boolean)
@@ -54,7 +55,7 @@ const runConfig = validationMode
   : config;
 let context;
 try {
-  context = await launchPersistentBrowser(runConfig);
+  context = await launchPersistentBrowser(runConfig, { forceVisible: visibleMode });
   const huaban = await findOrOpenPage(context, "https://huaban.com", "https://huaban.com/discovery");
   const chatgpt = await findOrOpenPage(context, "https://chatgpt.com", "https://chatgpt.com/");
 

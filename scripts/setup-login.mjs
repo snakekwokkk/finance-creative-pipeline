@@ -4,7 +4,7 @@ import { ensureConfig } from "./lib/config.mjs";
 import { launchPersistentBrowser } from "./lib/browser.mjs";
 
 const config = await ensureConfig();
-const context = await launchPersistentBrowser(config);
+const context = await launchPersistentBrowser(config, { forceVisible: true });
 const huaban = await context.newPage();
 const chatgpt = await context.newPage();
 await Promise.all([

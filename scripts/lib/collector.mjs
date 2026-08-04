@@ -20,16 +20,16 @@ const DEFAULT_SEARCH_PLANS = [
     type: "banner",
     count: 4,
     keywords: [
-      "互联网金融 Banner", "借贷 活动 Banner", "金融 App 横幅", "贷款 运营 Banner",
-      "金融 营销横幅", "借款 福利 Banner"
+      "金融banner", "理财banner", "投资理财banner", "金融产品banner",
+      "基金理财banner", "证券banner", "简约金融banner"
     ]
   },
   {
     type: "float",
     count: 4,
     keywords: [
-      "互联网金融 浮窗", "借贷 悬浮窗", "金融 App 悬浮飘窗", "贷款 活动浮标",
-      "金融 运营浮窗", "借款 悬浮入口"
+      "浮窗", "小浮窗", "悬浮窗素材", "活动浮窗",
+      "红包浮窗", "福利浮窗", "悬浮按钮", "活动浮标"
     ]
   }
 ];
@@ -51,6 +51,12 @@ export function isSameImage(candidate, references) {
     if (!candidate.ahash || existing.ahash !== candidate.ahash || !existing.width || !existing.height) return false;
     return Math.abs(candidateRatio - existing.width / existing.height) <= 0.01;
   });
+}
+
+export function isReferenceShapeAllowed(type, width, height, maxFloatHeightToWidthRatio = 2) {
+  if (!width || !height) return false;
+  if (type !== "float") return true;
+  return height / width <= maxFloatHeightToWidthRatio;
 }
 
 function inferReferenceType(item) {
@@ -282,15 +288,17 @@ async function downloadBestImage(context, item, urls, targetFile, minWidth) {
   return best;
 }
 
-async function qualifiedExistingReferences(existing, minWidth) {
+async function qualifiedExistingReferences(existing, minWidth, maxFloatHeightToWidthRatio) {
   const qualified = [];
   for (const item of existing) {
     try {
       const [metadata, stat] = await Promise.all([sharp(item.file).metadata(), fs.stat(item.file)]);
       if (!metadata.width || !metadata.height || metadata.width < minWidth) continue;
+      const referenceType = inferReferenceType(item);
+      if (!isReferenceShapeAllowed(referenceType, metadata.width, metadata.height, maxFloatHeightToWidthRatio)) continue;
       qualified.push({
         ...item,
-        referenceType: inferReferenceType(item),
+        referenceType,
         width: metadata.width,
         height: metadata.height,
         fileSize: stat.size
@@ -307,8 +315,9 @@ export async function collectReferences({ context, page, config, runDir, date, c
   const minWidth = Math.max(1, Number(config.collection.minReferenceWidthPx || 720));
   const perKeywordLimit = Math.max(1, Number(config.collection.perKeywordLimit || 2));
   const maxSearchScrolls = Math.max(1, Number(config.collection.maxSearchScrolls || 20));
+  const maxFloatHeightToWidthRatio = Math.max(1, Number(config.collection.maxFloatHeightToWidthRatio || 2));
   const plans = buildSearchPlans(config.collection, count, date);
-  const results = await qualifiedExistingReferences(existing, minWidth);
+  const results = await qualifiedExistingReferences(existing, minWidth, maxFloatHeightToWidthRatio);
   if (results.length !== existing.length) await writeJsonAtomic(path.join(runDir, "references.json"), results);
   if (results.length >= count) return results.slice(0, count);
 
@@ -339,6 +348,9 @@ export async function collectReferences({ context, page, config, runDir, date, c
             const urls = await resolveDetailImageUrls(detailPage, candidate);
             const downloaded = await downloadBestImage(context, candidate, urls, tempFile, minWidth);
             const { buffer, metadata, imageUrl, fileSize } = downloaded;
+            if (!isReferenceShapeAllowed(plan.type, metadata.width, metadata.height, maxFloatHeightToWidthRatio)) {
+              throw new Error(`Pin ${candidate.pinId} 为 ${metadata.width}x${metadata.height}，形状更像完整手机页面而不是独立浮窗`);
+            }
             const sha256 = crypto.createHash("sha256").update(buffer).digest("hex");
             const ahash = await averageHash(buffer);
             if (isSameImage({ sha256, ahash, width: metadata.width, height: metadata.height }, history.references)) {

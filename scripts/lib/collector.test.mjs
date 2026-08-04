@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildSearchPlans, buildSearchPlansForTypes, isSameImage } from "./collector.mjs";
+import { buildSearchPlans, buildSearchPlansForTypes, isReferenceShapeAllowed, isSameImage } from "./collector.mjs";
 
 test("default search plan preserves type quotas", () => {
   const plans = buildSearchPlans({}, 20, "2026-08-04");
@@ -11,7 +11,12 @@ test("default search plan preserves type quotas", () => {
   ]);
   assert.ok(plans[0].keywords.every((keyword) => /弹窗/.test(keyword)));
   assert.ok(plans[1].keywords.every((keyword) => /banner|横幅/i.test(keyword)));
+  assert.ok(plans[1].keywords.every((keyword) => /金融|理财|投资|基金|证券/.test(keyword)));
+  assert.ok(plans[1].keywords.includes("金融banner"));
+  assert.ok(plans[1].keywords.every((keyword) => !/弹窗|浮窗|悬浮|浮标/.test(keyword)));
   assert.ok(plans[2].keywords.every((keyword) => /浮窗|悬浮|浮标/.test(keyword)));
+  assert.ok(plans[2].keywords.includes("浮窗"));
+  assert.ok(plans[2].keywords.every((keyword) => !/App|界面|页面|运营/i.test(keyword)));
 });
 
 test("small test runs use only popup references", () => {
@@ -30,7 +35,20 @@ test("three-type validation uses two references from each matching keyword pool"
   ]);
   assert.ok(plans[0].keywords.every((keyword) => /弹窗/.test(keyword)));
   assert.ok(plans[1].keywords.every((keyword) => /banner|横幅/i.test(keyword)));
+  assert.ok(plans[1].keywords.every((keyword) => /金融|理财|投资|基金|证券/.test(keyword)));
+  assert.ok(plans[1].keywords.includes("金融banner"));
+  assert.ok(plans[1].keywords.every((keyword) => !/弹窗|浮窗|悬浮|浮标/.test(keyword)));
   assert.ok(plans[2].keywords.every((keyword) => /浮窗|悬浮|浮标/.test(keyword)));
+  assert.ok(plans[2].keywords.includes("浮窗"));
+  assert.ok(plans[2].keywords.every((keyword) => !/App|界面|页面|运营/i.test(keyword)));
+});
+
+test("float references reject full-height phone screens", () => {
+  assert.equal(isReferenceShapeAllowed("float", 1170, 2532), false);
+  assert.equal(isReferenceShapeAllowed("float", 828, 1792), false);
+  assert.equal(isReferenceShapeAllowed("float", 1000, 1000), true);
+  assert.equal(isReferenceShapeAllowed("float", 800, 1400), true);
+  assert.equal(isReferenceShapeAllowed("popup", 828, 1792), true);
 });
 
 test("duplicate detection rejects only the same image", () => {

@@ -1,11 +1,16 @@
 import fs from "node:fs/promises";
 import { chromium } from "playwright-core";
 
-export async function launchPersistentBrowser(config) {
+export function shouldRunHeadless(config, { forceVisible = false } = {}) {
+  if (forceVisible) return false;
+  return config.browser?.headless !== false;
+}
+
+export async function launchPersistentBrowser(config, options = {}) {
   await fs.mkdir(config.profileDirectory, { recursive: true });
   return chromium.launchPersistentContext(config.profileDirectory, {
     executablePath: config.chromeExecutable,
-    headless: false,
+    headless: shouldRunHeadless(config, options),
     viewport: { width: 1440, height: 1000 },
     acceptDownloads: true,
     locale: "zh-CN",
