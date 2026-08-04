@@ -164,13 +164,19 @@ function looksBlocked(text) {
 }
 
 async function chooseSearchBox(page) {
-  const candidates = [
-    page.getByRole("textbox"),
-    page.locator('input[type="search"]'),
-    page.locator('input[placeholder*="搜索"]')
-  ];
-  for (const locator of candidates) {
-    if (await locator.count()) return locator.first();
+  const started = Date.now();
+  while (Date.now() - started < 15_000) {
+    const pageText = await page.locator("body").innerText({ timeout: 5_000 }).catch(() => "");
+    if (looksBlocked(pageText)) throw new Error("花瓣要求安全验证，请在专用浏览器窗口中完成后重试");
+    const candidates = [
+      page.getByRole("textbox"),
+      page.locator('input[type="search"]'),
+      page.locator('input[placeholder*="搜索"]')
+    ];
+    for (const locator of candidates) {
+      if (await locator.count()) return locator.first();
+    }
+    await page.waitForTimeout(500);
   }
   throw new Error("未找到花瓣搜索框");
 }

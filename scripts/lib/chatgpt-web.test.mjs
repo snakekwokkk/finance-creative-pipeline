@@ -5,6 +5,8 @@ import {
   analysisPrompt,
   assistantReportsMissingReferenceImages,
   attachmentDeliveryStatus,
+  chatGptLoginRequired,
+  chatGptSessionAuthenticated,
   clearDirectionFailure,
   conversationUrl,
   dailyProjectName,
@@ -19,6 +21,15 @@ import {
   separateAssetPrompt,
   selectReferencePair
 } from "./chatgpt-web.mjs";
+
+test("ChatGPT login detection ignores unrelated sidebar text", () => {
+  assert.equal(chatGptLoginRequired({ url: "https://chatgpt.com/", visibleLoginControls: 0 }), false);
+  assert.equal(chatGptLoginRequired({ url: "https://chatgpt.com/auth/login", visibleLoginControls: 0 }), true);
+  assert.equal(chatGptLoginRequired({ url: "https://chatgpt.com/", visibleLoginControls: 1 }), true);
+  assert.equal(chatGptSessionAuthenticated({ WARNING_BANNER: {} }), false);
+  assert.equal(chatGptSessionAuthenticated({ user: { id: "user-1" } }), true);
+  assert.equal(chatGptSessionAuthenticated({ accessToken: "present" }), true);
+});
 
 test("reference uploads are accepted only after every image attachment is visibly ready", () => {
   const files = ["/tmp/01-popup.webp", "/tmp/02-popup.webp"];

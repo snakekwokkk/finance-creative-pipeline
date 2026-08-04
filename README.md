@@ -84,7 +84,7 @@ cp assets/config.example.json \
 npm run setup
 ```
 
-登录设置会强制打开带持久化配置的可见 Chrome 窗口，请手动完成花瓣和 ChatGPT 登录。除此之外，测试、正式、定时和断点恢复运行均默认使用后台无窗口模式，不会抢占当前输入焦点。遇到验证码、安全验证或权限确认时会停止并通知用户，流水线不会绕过安全限制。
+登录设置、测试、正式、定时和断点恢复运行均使用带持久化配置的可见专用 Chrome。花瓣会对无头浏览器返回 `405`，而 macOS 后台启动方式不能稳定复用 ChatGPT 登录会话，因此默认不再隐藏或最小化窗口。遇到验证码、安全验证或权限确认时会停止并通知用户，流水线不会绕过安全限制。
 
 先运行小规模测试：
 
@@ -118,7 +118,7 @@ codex plugin add finance-creative-pipeline@<marketplace-name>
 | `chromeExecutable` | Chrome 可执行文件路径 |
 | `profileDirectory` | 持久化登录配置目录 |
 | `outputRoot` | 每日运行产物根目录 |
-| `browser.headless` | 正式流水线是否后台无窗口运行，默认 `true`；登录设置始终可见 |
+| `browser.mode` | 浏览器模式，默认 `visible`；`background` 和 `headless` 仅保留用于诊断 |
 | `figma.fileKey` | 目标 Figma 文件 key |
 | `figma.pageId` | 目标 Figma 页面 ID |
 | `collection.referenceCount` | 正式运行采集的参考图数量 |
@@ -216,7 +216,7 @@ npm run test-three-types # 弹窗、Banner、浮窗各 1 个的隔离验证运�
 npm run test-transparent-assets -- --image /path/to/preview.png # 只测试透明素材拆分
 npm run find-remix-icon -- --query "shield check" --style line # 检索 Remix Icon SVG
 npm run run            # 20 张参考图、10 个方向的正式运行
-npm run run -- --visible # 仅调试时临时显示专用 Chrome
+npm run run -- --visible # 显式强制可见模式，可覆盖诊断用 browser.mode 配置
 npm run check-missed   # 检查漏跑
 npm run check          # 运行语法检查和自动化测试
 ```
@@ -304,7 +304,7 @@ For first use or expired sessions:
 npm run setup
 ```
 
-Login setup forces a visible Chrome window with the persistent profile so Huaban and ChatGPT authentication can be completed manually. Test, normal, scheduled, and resumed runs are otherwise headless by default and do not steal keyboard focus. CAPTCHA, security checks, and permission prompts stop the run and require user action; they are never bypassed.
+Login setup, tests, normal runs, scheduled runs, and resumed runs all use a visible dedicated Chrome with the persistent profile. Huaban returns HTTP 405 to headless Chrome, while the macOS background-launch mode does not reliably preserve the ChatGPT authenticated session, so the window is no longer hidden or minimized by default. CAPTCHA, security checks, and permission prompts stop the run and require user action; they are never bypassed.
 
 Run the small test first:
 
@@ -338,7 +338,7 @@ User configuration lives outside the repository and should never be committed:
 | `chromeExecutable` | Chrome executable path |
 | `profileDirectory` | Persistent login profile directory |
 | `outputRoot` | Root directory for daily artifacts |
-| `browser.headless` | Run the normal pipeline without a visible browser window; defaults to `true`, while login setup always remains visible |
+| `browser.mode` | Browser mode; defaults to `visible`, while `background` and `headless` remain diagnostic-only alternatives |
 | `figma.fileKey` | Target Figma file key |
 | `figma.pageId` | Target Figma page ID |
 | `collection.referenceCount` | Number of references in a normal run |
@@ -436,7 +436,7 @@ npm run test-three-types # Isolated validation with one popup, Banner, and float
 npm run test-transparent-assets -- --image /path/to/preview.png # Test transparent separation only
 npm run find-remix-icon -- --query "shield check" --style line # Search Remix Icon SVGs
 npm run run            # Normal 20-reference, 10-direction run
-npm run run -- --visible # Temporarily show the dedicated Chrome for debugging only
+npm run run -- --visible # Explicitly force visible mode, overriding diagnostic browser.mode settings
 npm run check-missed   # Check for a missed scheduled run
 npm run check          # Run syntax checks and automated tests
 ```

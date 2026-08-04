@@ -60,12 +60,52 @@ async function waitForComposer(page, timeout = 30_000) {
   throw lastError;
 }
 
-async function ensureLoggedIn(page) {
+export function chatGptLoginRequired({ url = "", visibleLoginControls = 0 } = {}) {
+  let authPage = false;
+  try { authPage = /^\/auth(?:\/|$)/.test(new URL(url).pathname); } catch {}
+  return authPage || visibleLoginControls > 0;
+}
+
+export function chatGptSessionAuthenticated(session) {
+  return Boolean(session?.user || session?.accessToken);
+}
+
+async function readChatGptSession(page) {
+  return page.evaluate(async () => {
+    try {
+      const response = await fetch("/api/auth/session", { credentials: "include" });
+      const data = await response.json().catch(() => null);
+      return { status: response.status, authenticated: Boolean(data?.user || data?.accessToken) };
+    } catch (error) {
+      return { status: 0, authenticated: false, error: error.message };
+    }
+  });
+}
+
+async function visibleLoginControlCount(page) {
+  const candidates = [
+    page.getByRole("button", { name: /^(登录|Log in)$/i }),
+    page.getByRole("link", { name: /^(登录|Log in)$/i })
+  ];
+  let visible = 0;
+  for (const candidate of candidates) {
+    for (let index = 0; index < await candidate.count(); index += 1) {
+      if (await candidate.nth(index).isVisible().catch(() => false)) visible += 1;
+    }
+  }
+  return visible;
+}
+
+export async function ensureChatGptLoggedIn(page) {
   await page.goto("https://chatgpt.com/", { waitUntil: "domcontentloaded", timeout: 60_000 });
   await page.waitForTimeout(1200);
-  const body = await page.locator("body").innerText({ timeout: 20_000 });
-  if (/Log in|登录|Sign up|注册/.test(body) && /登录|Log in/.test(body)) {
+  const visibleLoginControls = await visibleLoginControlCount(page);
+  if (chatGptLoginRequired({ url: page.url(), visibleLoginControls })) {
     throw new Error("ChatGPT 专用浏览器尚未登录，请先运行登录设置");
+  }
+  const session = await readChatGptSession(page);
+  if (!session.authenticated) {
+    throw new Error(`ChatGPT 账户会话尚未建立（状态 ${session.status || "不可用"}），请先运行登录设置`);
   }
   await waitForComposer(page);
 }
@@ -711,7 +751,7 @@ export async function generateDirections({
   runDate = null,
   onProjectReady = async () => {}
 }) {
-  await ensureLoggedIn(page);
+  await ensureChatGptLoggedIn(page);
   const directionsDir = path.join(runDir, "directions");
   await fs.mkdir(directionsDir, { recursive: true });
   const manifestFile = path.join(runDir, "figma-manifest.json");

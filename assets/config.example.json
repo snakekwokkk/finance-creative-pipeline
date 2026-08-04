@@ -4,7 +4,7 @@
   "profileDirectory": "~/Library/Application Support/Codex/finance-creative-pipeline/chrome-profile",
   "outputRoot": "~/Desktop/互联网金融素材",
   "browser": {
-    "headless": true
+    "mode": "visible"
   },
   "chatgpt": {
     "dailyProjects": true,
