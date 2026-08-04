@@ -2,17 +2,27 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { appSupportDir, ensureConfig, localDate, localTime } from "./lib/config.mjs";
 import { launchPersistentBrowser, findOrOpenPage, screenshotFailure } from "./lib/browser.mjs";
-import { collectReferences } from "./lib/collector.mjs";
+import { buildSearchPlansForTypes, collectReferences } from "./lib/collector.mjs";
 import { activeDirectionFailures, generateDirections } from "./lib/chatgpt-web.mjs";
 import { appendError, ensureRun, readJson, updateRun, writeJsonAtomic } from "./lib/state.mjs";
 import { notify } from "./lib/notify.mjs";
 
 const testMode = process.argv.includes("--test");
 const scheduledMode = process.argv.includes("--scheduled");
+const typesIndex = process.argv.indexOf("--types");
+const requestedTypes = typesIndex >= 0
+  ? String(process.argv[typesIndex + 1] || "").split(",").map((item) => item.trim().toLowerCase()).filter(Boolean)
+  : [];
+const allowedTypes = new Set(["popup", "banner", "float"]);
+if (requestedTypes.some((type) => !allowedTypes.has(type))) {
+  throw new Error("--types 只支持 popup、banner、float，并使用逗号分隔");
+}
+const validationMode = requestedTypes.length > 0;
 const config = await ensureConfig();
 await fs.mkdir(config.outputRoot, { recursive: true });
 const date = localDate(config.timezone);
-const runDir = path.join(config.outputRoot, date);
+const runName = validationMode ? `${date}-validation-${requestedTypes.join("-")}` : date;
+const runDir = path.join(config.outputRoot, runName);
 const runFile = path.join(runDir, "run.json");
 await fs.mkdir(runDir, { recursive: true });
 
@@ -28,20 +38,39 @@ if (scheduledMode && localTime(config.timezone) > "10:45" && !existingRun) {
   console.log(JSON.stringify({ status: "MISSED_RUN", date, message: "等待用户确认补跑" }));
   process.exit(0);
 }
-await ensureRun(runFile, date, testMode);
+await ensureRun(runFile, date, testMode || validationMode);
 
-const referenceCount = testMode ? 3 : config.collection.referenceCount;
-const directionCount = testMode ? 1 : config.generation.directionCount;
+const referenceCount = validationMode ? requestedTypes.length * 2 : testMode ? 3 : config.collection.referenceCount;
+const directionCount = validationMode ? requestedTypes.length : testMode ? 1 : config.generation.directionCount;
+const runConfig = validationMode
+  ? {
+      ...config,
+      collection: {
+        ...config.collection,
+        searchPlans: buildSearchPlansForTypes(config.collection, requestedTypes)
+      },
+      generation: { ...config.generation, directionCount }
+    }
+  : config;
 let context;
 try {
-  context = await launchPersistentBrowser(config);
+  context = await launchPersistentBrowser(runConfig);
   const huaban = await findOrOpenPage(context, "https://huaban.com", "https://huaban.com/discovery");
   const chatgpt = await findOrOpenPage(context, "https://chatgpt.com", "https://chatgpt.com/");
 
   await updateRun(runFile, { status: "running", stages: { collection: "running", generation: "pending", decomposition: "pending", figma: "pending" } });
-  const references = await collectReferences({ context, page: huaban, config, runDir, date, count: referenceCount });
+  const references = await collectReferences({ context, page: huaban, config: runConfig, runDir, date, count: referenceCount });
   await updateRun(runFile, { status: "running", referenceCount: references.length, stages: { collection: "complete", generation: "running", decomposition: "pending", figma: "pending" } });
-  const manifest = await generateDirections({ page: chatgpt, config, runDir, references, count: directionCount });
+  const manifest = await generateDirections({
+    page: chatgpt,
+    config: runConfig,
+    runDir,
+    references,
+    count: directionCount,
+    directionTypes: validationMode ? requestedTypes : null,
+    runDate: date,
+    onProjectReady: (chatgptProject) => updateRun(runFile, { chatgptProject })
+  });
   const readyCount = manifest.directions.filter((item) => item.status === "ready").length;
   const failures = activeDirectionFailures(manifest);
   const manifestFile = path.join(runDir, "figma-manifest.json");
@@ -50,6 +79,7 @@ try {
       status: "blocked",
       directionCount: readyCount,
       directionFailures: failures,
+      chatgptProject: manifest.chatgptProject,
       figmaManifest: manifestFile,
       stages: { collection: "complete", generation: "partial", decomposition: "partial", figma: "pending" }
     });
@@ -61,10 +91,11 @@ try {
       status: "awaiting_figma",
       directionCount: readyCount,
       directionFailures: [],
+      chatgptProject: manifest.chatgptProject,
       figmaManifest: manifestFile,
       stages: { collection: "complete", generation: "complete", decomposition: "complete", figma: "pending" }
     });
-    await notify("金融运营素材流水线", `本地素材和生图已完成，等待写入 Figma：${runDir}`);
+    await notify("金融运营素材流水线", `${validationMode ? "验证素材" : "本地素材和生图"}已完成，等待写入 Figma：${runDir}`);
     console.log(JSON.stringify({ status: "awaiting_figma", runDir, manifest: manifestFile }));
   }
 } catch (error) {

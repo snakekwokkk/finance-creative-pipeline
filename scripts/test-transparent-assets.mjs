@@ -1,9 +1,9 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import sharp from "sharp";
-import { ensureConfig } from "./lib/config.mjs";
+import { ensureConfig, localDate } from "./lib/config.mjs";
 import { findOrOpenPage, launchPersistentBrowser, screenshotFailure } from "./lib/browser.mjs";
-import { decomposePreview } from "./lib/chatgpt-web.mjs";
+import { decomposePreview, ensureDailyProject, openDirectionChat } from "./lib/chatgpt-web.mjs";
 
 function value(name) {
   const index = process.argv.indexOf(name);
@@ -28,6 +28,8 @@ let page;
 try {
   context = await launchPersistentBrowser(config);
   page = await findOrOpenPage(context, "https://chatgpt.com", "https://chatgpt.com/");
+  const project = await ensureDailyProject(page, config, localDate(config.timezone));
+  await openDirectionChat(page, project);
   const layers = await decomposePreview(
     page,
     config,
@@ -35,7 +37,8 @@ try {
     outputDir,
     directionIndex,
     metadata.width,
-    metadata.height
+    metadata.height,
+    "popup"
   );
   console.log(JSON.stringify({
     status: "ready",

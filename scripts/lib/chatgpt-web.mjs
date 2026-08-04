@@ -49,6 +49,17 @@ async function composer(page) {
   throw new Error("未找到 ChatGPT 输入框，可能需要登录或页面已更新");
 }
 
+async function waitForComposer(page, timeout = 30_000) {
+  const started = Date.now();
+  let lastError;
+  while (Date.now() - started < timeout) {
+    try { return await composer(page); }
+    catch (error) { lastError = error; }
+    await page.waitForTimeout(500);
+  }
+  throw lastError;
+}
+
 async function ensureLoggedIn(page) {
   await page.goto("https://chatgpt.com/", { waitUntil: "domcontentloaded", timeout: 60_000 });
   await page.waitForTimeout(1200);
@@ -56,15 +67,15 @@ async function ensureLoggedIn(page) {
   if (/Log in|登录|Sign up|注册/.test(body) && /登录|Log in/.test(body)) {
     throw new Error("ChatGPT 专用浏览器尚未登录，请先运行登录设置");
   }
-  await composer(page);
+  await waitForComposer(page);
 }
 
-async function startNewChat(page) {
+async function navigateWithRetry(page, url) {
   let lastError;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      await page.goto("https://chatgpt.com/", { waitUntil: "domcontentloaded", timeout: 60_000 });
-      await composer(page);
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60_000 });
+      await waitForComposer(page);
       return;
     } catch (error) {
       lastError = error;
@@ -73,6 +84,132 @@ async function startNewChat(page) {
     }
   }
   throw lastError;
+}
+
+export function dailyProjectName(config, date) {
+  const prefix = String(config?.chatgpt?.projectNamePrefix || "金融运营素材").trim();
+  return `${prefix} ${date}`;
+}
+
+export function projectBaseUrl(value) {
+  try {
+    const url = new URL(value);
+    const match = url.pathname.match(/^\/g\/g-p-[^/]+/);
+    return match ? `${url.origin}${match[0]}` : null;
+  } catch {
+    return null;
+  }
+}
+
+export function conversationUrl(value) {
+  try {
+    const url = new URL(value);
+    if (!/\/c\/[^/]+/.test(url.pathname)) return null;
+    return `${url.origin}${url.pathname}`;
+  } catch {
+    return null;
+  }
+}
+
+async function expandProjects(page) {
+  const candidates = page.locator('button[aria-expanded]');
+  const count = await candidates.count();
+  for (let index = 0; index < count; index += 1) {
+    const button = candidates.nth(index);
+    const text = (await button.innerText().catch(() => "")).trim();
+    if (!/^(项目|Projects)$/i.test(text)) continue;
+    if (await button.getAttribute("aria-expanded") === "false") await button.click();
+    return;
+  }
+}
+
+async function findProjectRow(page, name) {
+  await expandProjects(page);
+  const rows = page.locator('[class*="project-unfurl-row"]');
+  const count = await rows.count();
+  for (let index = 0; index < count; index += 1) {
+    const row = rows.nth(index);
+    if ((await row.innerText().catch(() => "")).trim() === name) return row;
+  }
+  return null;
+}
+
+async function findVisibleNewProjectButton(page) {
+  const buttons = page.getByRole("button", { name: /新项目|New project/i });
+  const count = await buttons.count();
+  for (let index = 0; index < count; index += 1) {
+    const button = buttons.nth(index);
+    if (await button.isVisible().catch(() => false)) return button;
+  }
+  return null;
+}
+
+async function waitForProjectUi(page, name, timeout = 20_000) {
+  const started = Date.now();
+  while (Date.now() - started < timeout) {
+    const existing = await findProjectRow(page, name);
+    if (existing) return { existing, create: null };
+    const create = await findVisibleNewProjectButton(page);
+    if (create) return { existing: null, create };
+    await page.waitForTimeout(500);
+  }
+  throw new Error("未找到 ChatGPT 新项目按钮，无法按日期整理自动任务聊天");
+}
+
+async function visibleTextInput(page, timeout = 15_000) {
+  const started = Date.now();
+  while (Date.now() - started < timeout) {
+    const inputs = page.locator('input[name="projectName"], #project-name, input[type="text"]');
+    const count = await inputs.count();
+    for (let index = 0; index < count; index += 1) {
+      const input = inputs.nth(index);
+      if (await input.isVisible().catch(() => false)) return input;
+    }
+    await page.waitForTimeout(250);
+  }
+  throw new Error("未找到 ChatGPT 项目名称输入框，项目创建界面可能已更新");
+}
+
+export async function ensureDailyProject(page, config, date) {
+  if (config?.chatgpt?.dailyProjects === false) {
+    return { enabled: false, name: null, url: "https://chatgpt.com/", baseUrl: null };
+  }
+  const name = dailyProjectName(config, date);
+  await navigateWithRetry(page, "https://chatgpt.com/");
+  const { existing, create } = await waitForProjectUi(page, name);
+  if (existing) {
+    const open = existing.getByRole("button", { name: /打开项目首页|Open project home/i });
+    if (!(await open.count())) throw new Error(`找到了 ChatGPT 项目“${name}”，但无法打开项目首页`);
+    await open.first().click();
+  } else {
+    await create.click();
+    const input = await visibleTextInput(page);
+    await input.fill(name);
+    const submit = page.getByRole("button", { name: /创建项目|Create project/i });
+    if (!(await submit.count())) throw new Error("未找到 ChatGPT 创建项目确认按钮");
+    await submit.last().click();
+  }
+  await page.waitForURL((url) => Boolean(projectBaseUrl(url.href)), { timeout: 30_000 });
+  await waitForComposer(page);
+  const url = page.url().split("?")[0];
+  const baseUrl = projectBaseUrl(url);
+  if (!baseUrl) throw new Error(`ChatGPT 项目“${name}”创建或打开后无法验证项目 URL`);
+  return { enabled: true, name, url: `${baseUrl}/project`, baseUrl };
+}
+
+export async function openDirectionChat(page, project, savedChatUrl = null) {
+  let target = project.url;
+  if (savedChatUrl) {
+    const savedBase = projectBaseUrl(savedChatUrl);
+    if (project.enabled && savedBase !== project.baseUrl) {
+      throw new Error("已记录的 ChatGPT 方向聊天不属于当天项目，已停止以避免素材串线");
+    }
+    if (!project.enabled || savedBase === project.baseUrl) target = savedChatUrl;
+  }
+  await navigateWithRetry(page, target);
+  if (project.enabled && projectBaseUrl(page.url()) !== project.baseUrl) {
+    throw new Error(`未能进入 ChatGPT 项目“${project.name}”，已停止以避免创建散落聊天`);
+  }
 }
 
 async function attachFiles(page, files) {
@@ -301,7 +438,7 @@ export function decompositionPrompt(index, width, height, maxAssets, type) {
   const firstLayer = type === "popup"
     ? '{"id":"modal_card","role":"Container/MainCard","kind":"card","bbox":{"x":0.16,"y":0.15,"width":0.68,"height":0.72},"editable":"vector","zIndex":10,"confidence":0.98}'
     : '{"id":"background","role":"Background","kind":"background","bbox":{"x":0,"y":0,"width":1,"height":1},"editable":"background","zIndex":0,"confidence":0.98}';
-  return `分析第${index}套完整运营图（${width}x${height}），输出供 Figma 重构的图层 JSON。识别背景、卡片、按钮、文字、图标、装饰和主视觉，并为每层提供0到1的bbox、zIndex和confidence。${popupRule}\n\neditable只能是background、raster、vector或text。只有无法用 Figma 文字和基础矢量可靠重构、且必须保留原图细节的复杂主视觉、3D物体、人物、吉祥物或复杂插画才用raster，最多 ${maxAssets} 个；卡片、按钮、普通图标、图表、线条、光轨和简单装饰都用vector，文字用text。不要为了多拆图而把可重构元素标成raster。每个raster只需用assetPrompt简短指出要从原图提取的主体及其自带光影。\n\n只输出以下标记包裹的合法JSON，不要解释：\nDECOMPOSE_START\n{\n  "schemaVersion": 4,\n  "canvas": {"width": ${width}, "height": ${height}},\n  "layers": [\n    ${firstLayer},\n    {"id":"hero","role":"Visual/Hero","kind":"illustration","bbox":{"x":0.18,"y":0.2,"width":0.64,"height":0.45},"assetPrompt":"主视觉及其自带光影","editable":"raster","zIndex":20,"confidence":0.9},\n    {"id":"title","role":"Copy/Title","kind":"text","bbox":{"x":0.2,"y":0.7,"width":0.6,"height":0.08},"text":"图中原文","typography":{"sizeLevel":"large","weight":"bold","color":"#000000","align":"center"},"editable":"text","zIndex":40,"confidence":0.9}\n  ]\n}\nDECOMPOSE_END\n\n不要改写文字，不要猜看不清的内容，不要输出蒙版或多边形。`;
+  return `分析第${index}套完整运营图（${width}x${height}），输出供 Figma 重构的图层 JSON。识别背景、卡片、按钮、文字、图标、装饰和主视觉，并为每层提供0到1的bbox、zIndex和confidence。${popupRule}\n\neditable只能是background、raster、vector或text。只有无法用 Figma 文字和基础矢量可靠重构、且必须保留原图细节的复杂主视觉、3D物体、人物、吉祥物或复杂插画才用raster，最多 ${maxAssets} 个；卡片、按钮、普通图标、图表、线条、光轨和简单装饰都用vector，文字用text。不要为了多拆图而把可重构元素标成raster。每个raster只需用assetPrompt简短指出要从原图提取的主体及其自带光影。每个普通功能图标使用kind=icon，并增加icon对象：query用2到4个简短英文词准确描述图标语义，style只可为line或fill，color使用原图十六进制颜色；不要臆造图标库文件名。\n\n只输出以下标记包裹的合法JSON，不要解释：\nDECOMPOSE_START\n{\n  "schemaVersion": 4,\n  "canvas": {"width": ${width}, "height": ${height}},\n  "layers": [\n    ${firstLayer},\n    {"id":"hero","role":"Visual/Hero","kind":"illustration","bbox":{"x":0.18,"y":0.2,"width":0.64,"height":0.45},"assetPrompt":"主视觉及其自带光影","editable":"raster","zIndex":20,"confidence":0.9},\n    {"id":"security_icon","role":"Icon/Security","kind":"icon","bbox":{"x":0.16,"y":0.58,"width":0.06,"height":0.06},"icon":{"query":"shield check","style":"line","color":"#2F6BFF"},"editable":"vector","zIndex":30,"confidence":0.9},\n    {"id":"title","role":"Copy/Title","kind":"text","bbox":{"x":0.2,"y":0.7,"width":0.6,"height":0.08},"text":"图中原文","typography":{"sizeLevel":"large","weight":"bold","color":"#000000","align":"center"},"editable":"text","zIndex":40,"confidence":0.9}\n  ]\n}\nDECOMPOSE_END\n\n不要改写文字，不要猜看不清的内容，不要输出蒙版或多边形。`;
 }
 
 export function separateAssetPrompt(layer) {
@@ -341,7 +478,7 @@ export function requiresUserAction(error) {
     .test(String(error?.message || error));
 }
 
-export async function decomposePreview(page, config, previewFile, directionDir, index, width, height, type) {
+export async function decomposePreview(page, config, previewFile, directionDir, index, width, height, type, onConversationReady = async () => {}) {
   const layersFile = path.join(directionDir, "layers.json");
   const outputDir = path.join(directionDir, "layers");
   const reportFile = path.join(outputDir, "decomposition-report.json");
@@ -351,11 +488,11 @@ export async function decomposePreview(page, config, previewFile, directionDir, 
   const decompositionTimeout = config.generation.decompositionTimeoutMinutes || config.generation.analysisTimeoutMinutes;
   const assetConfig = config.transparentAssets || {};
   const maxAssets = assetConfig.maxAssets ?? 4;
-  await startNewChat(page);
   await attachFiles(page, [previewFile]);
   let layers = cached?.schemaVersion >= 4 && cached?.layers?.length ? cached : null;
   if (!layers) {
     let analysis = await sendAndRead(page, decompositionPrompt(index, width, height, maxAssets, type), minuteTimeout(decompositionTimeout));
+    await onConversationReady();
     const analysisFile = path.join(directionDir, "decomposition-analysis.txt");
     await fs.writeFile(analysisFile, analysis.text, "utf8");
     let parsed;
@@ -363,6 +500,7 @@ export async function decomposePreview(page, config, previewFile, directionDir, 
       parsed = extractMarkedJson(analysis.text, "DECOMPOSE_START", "DECOMPOSE_END");
     } catch {
       const repair = await sendAndRead(page, "上一条回复没有包含可解析的 DECOMPOSE_START / DECOMPOSE_END JSON。不要解释、不要生成图片，请严格按照上一条要求重新输出完整的标记 JSON。", minuteTimeout(decompositionTimeout));
+      await onConversationReady();
       await fs.appendFile(analysisFile, `\n\n--- FORMAT_RETRY ---\n\n${repair.text}`, "utf8");
       parsed = extractMarkedJson(repair.text, "DECOMPOSE_START", "DECOMPOSE_END");
       analysis = repair;
@@ -382,8 +520,6 @@ export async function decomposePreview(page, config, previewFile, directionDir, 
   const maxCorrectionAttempts = Math.max(0, Number(assetConfig.maxCorrectionAttempts ?? 1) || 0);
   const assetResults = new Map();
   for (const layer of layers.layers.filter(isRasterAsset).sort((left, right) => left.assetIndex - right.assetIndex)) {
-    await startNewChat(page);
-    await attachFiles(page, [previewFile]);
     let result;
     for (let attempt = 0; attempt <= maxCorrectionAttempts; attempt += 1) {
       const candidateFile = path.join(outputDir, `.candidate-${layer.assetIndex + 1}.png`);
@@ -393,6 +529,7 @@ export async function decomposePreview(page, config, previewFile, directionDir, 
         : separateAssetCorrectionPrompt(layer, result.reason);
       await sendPrompt(page, prompt);
       await saveLastAssistantImage(page, candidateFile, assetTimeout, previousSources, [previewFile]);
+      await onConversationReady();
       result = await validateSeparateAsset({ candidateFile, layer, outputDir, thresholds: assetConfig });
       if (result.status === "accepted") {
         await fs.rm(candidateFile, { force: true });
@@ -414,12 +551,32 @@ export async function decomposePreview(page, config, previewFile, directionDir, 
   return layers;
 }
 
-export async function generateDirections({ page, config, runDir, references, count }) {
+export async function generateDirections({
+  page,
+  config,
+  runDir,
+  references,
+  count,
+  directionTypes = null,
+  runDate = null,
+  onProjectReady = async () => {}
+}) {
   await ensureLoggedIn(page);
   const directionsDir = path.join(runDir, "directions");
   await fs.mkdir(directionsDir, { recursive: true });
   const manifestFile = path.join(runDir, "figma-manifest.json");
-  const manifest = await readJson(manifestFile, { date: path.basename(runDir), figma: config.figma, directions: [] });
+  const manifest = await readJson(manifestFile, { date: runDate || path.basename(runDir), figma: config.figma, directions: [] });
+  manifest.directionChats ||= {};
+  let project = null;
+  if (manifest.chatgptProject?.url) {
+    project = {
+      enabled: manifest.chatgptProject.enabled !== false,
+      name: manifest.chatgptProject.name || dailyProjectName(config, manifest.date || path.basename(runDir)),
+      url: manifest.chatgptProject.url,
+      baseUrl: manifest.chatgptProject.baseUrl || projectBaseUrl(manifest.chatgptProject.url)
+    };
+    await onProjectReady(manifest.chatgptProject);
+  }
 
   for (let zero = 0; zero < count; zero += 1) {
     const index = zero + 1;
@@ -430,20 +587,48 @@ export async function generateDirections({ page, config, runDir, references, cou
     const existingLayers = await readJson(path.join(directionDir, "layers.json"));
     const existingReport = await readJson(path.join(directionDir, "layers", "decomposition-report.json"));
     if (existing && existingLayers?.schemaVersion >= 4 && existingLayers.layers?.length && await reportAssetsReady(existingReport)) continue;
+    if (!project) {
+      project = await ensureDailyProject(page, config, manifest.date || path.basename(runDir));
+      manifest.chatgptProject = { ...project, resolvedAt: new Date().toISOString() };
+      await writeJsonAtomic(manifestFile, manifest);
+      await onProjectReady(manifest.chatgptProject);
+    }
     let cachedSpec = await readJson(specFile);
-    const type = index <= 6 ? "popup" : index <= 8 ? "banner" : "float";
-    const typeIndex = type === "popup" ? index - 1 : type === "banner" ? index - 7 : index - 9;
+    const type = directionTypes?.[zero] || (index <= 6 ? "popup" : index <= 8 ? "banner" : "float");
+    const typeIndex = directionTypes
+      ? directionTypes.slice(0, zero).filter((candidate) => candidate === type).length
+      : type === "popup" ? index - 1 : type === "banner" ? index - 7 : index - 9;
     const pair = selectReferencePair(references, type, typeIndex);
     const size = type === "popup" ? { width: 1002, height: 1335 } : type === "banner" ? { width: 1140, height: 240 } : { width: 240, height: 240 };
     let lastError;
+    const savedChat = manifest.directionChats[String(index)]?.url
+      || (manifest.failures || []).find((item) => item.index === index)?.chatUrl;
+    await openDirectionChat(page, project, savedChat);
+    let referencesAttached = false;
+    const rememberConversation = async () => {
+      const url = conversationUrl(page.url());
+      if (!url) return null;
+      const previous = manifest.directionChats[String(index)];
+      if (previous?.url === url) return url;
+      manifest.directionChats[String(index)] = {
+        url,
+        projectUrl: project.url,
+        updatedAt: new Date().toISOString()
+      };
+      await writeJsonAtomic(manifestFile, manifest);
+      return url;
+    };
 
     for (let attempt = 0; attempt <= config.generation.maxRetries; attempt += 1) {
       try {
-        await startNewChat(page);
-        await attachFiles(page, pair.map((item) => item.file));
+        if (!referencesAttached) {
+          await attachFiles(page, pair.map((item) => item.file));
+          referencesAttached = true;
+        }
         let spec = cachedSpec;
         if (!spec) {
           const analysis = await sendAndRead(page, analysisPrompt(index, type), minuteTimeout(config.generation.analysisTimeoutMinutes));
+          await rememberConversation();
           spec = extractJson(analysis.text);
           cachedSpec = spec;
           await fs.writeFile(path.join(directionDir, "analysis.txt"), analysis.text, "utf8");
@@ -455,9 +640,11 @@ export async function generateDirections({ page, config, runDir, references, cou
           const previewImageSources = await visibleImageSources(page);
           await sendPrompt(page, previewPrompt(spec, size.width, size.height, type));
           await saveLastAssistantImage(page, previewFile, minuteTimeout(config.generation.imageTimeoutMinutes), previewImageSources, pair.map((item) => item.file));
+          await rememberConversation();
         }
 
-        const layers = await decomposePreview(page, config, previewFile, directionDir, index, size.width, size.height, type);
+        const layers = await decomposePreview(page, config, previewFile, directionDir, index, size.width, size.height, type, rememberConversation);
+        const chatUrl = await rememberConversation();
 
         const entry = {
           index, status: "ready", type, contentScope: type === "popup" ? "popup-only" : "full-canvas", ...size, previewFile,
@@ -467,6 +654,7 @@ export async function generateDirections({ page, config, runDir, references, cou
           transparentAssetCount: layers.layers.filter(isRasterAsset).length,
           layerCount: Array.isArray(layers.layers) ? layers.layers.length : 0,
           sourceUrls: pair.map((item) => item.sourceUrl),
+          chatUrl,
           keywords: spec.keywords || [],
           copy: spec.copy || {}
         };
@@ -477,6 +665,7 @@ export async function generateDirections({ page, config, runDir, references, cou
         break;
       } catch (error) {
         if (requiresUserAction(error)) throw error;
+        await rememberConversation().catch(() => {});
         lastError = error;
         console.error(`第 ${index} 套第 ${attempt + 1} 次尝试失败：${error.message}`);
         await screenshotFailure(page, path.join(directionDir, `error-attempt-${attempt + 1}.png`));
@@ -488,6 +677,7 @@ export async function generateDirections({ page, config, runDir, references, cou
         type,
         attempts: config.generation.maxRetries + 1,
         message: lastError.message,
+        chatUrl: manifest.directionChats[String(index)]?.url || null,
         failedAt: new Date().toISOString()
       };
       recordDirectionFailure(manifest, failure);

@@ -22,9 +22,10 @@ Finance Creative Pipeline 是一个面向中国互联网金融运营素材的 Co
 
 1. 使用持久化 Chrome 配置从花瓣 Pin 详情页采集高分辨率可见参考图，并保留来源链接和尺寸信息。
 2. 通过 ChatGPT 网页版分析参考图，并为每个方向生成一张品牌中性的完整预览图。
-3. 将预览图重新提交给 ChatGPT 网页版，识别复杂视觉元素并生成语义化 `layers.json`。
-4. 只把无法用 Figma 基础图形可靠重构的复杂主视觉逐个交给 ChatGPT，每个元素单独生成一张透明 PNG。
-5. 将预览图、通过检查的透明独立素材和原生文字/几何图层同步到 Figma。
+3. 每天创建或复用一个日期项目，每个方向只使用一个项目内聊天；该方向的生图、拆图和透明素材提取都在同一聊天完成。
+4. 将预览图继续提交到同一聊天，识别复杂视觉元素并生成语义化 `layers.json`。
+5. 只把无法用 Figma 基础图形可靠重构的复杂主视觉逐个交给 ChatGPT，每个元素单独生成一张透明 PNG。
+6. 将预览图、通过检查的透明独立素材和原生文字/几何图层同步到 Figma。
 
 默认正式运行会采集 20 张参考图并生成 10 个原创方向：6 个弹窗、2 个 Banner、2 个浮窗。
 
@@ -34,9 +35,11 @@ Finance Creative Pipeline 是一个面向中国互联网金融运营素材的 Co
 - 每个方向生成一张完整预览图；每个复杂素材都使用独立的 ChatGPT 任务和独立 PNG，不生成多元素素材板。
 - 弹窗方向只生成弹窗本体与干净的外部安全留白，不生成 App 页面、搜索栏、导航栏、底部 Tab、页面卡片或虚化界面背景。
 - 只拆复杂主视觉、3D物体、人物、吉祥物或复杂插画；卡片、按钮、普通图标、图表和简单装饰由 Figma 原生重构。
+- 普通功能图标优先从 [Remix Icon](https://remixicon.com/) 匹配官方 SVG，并以可编辑矢量导入 Figma；不再手绘临时图标或使用无语义占位形状。
 - ChatGPT 必须从原图单独提取并保持造型、比例、颜色、光影和细节，不得重新设计；本地不运行 Apple Vision 或其他 AI 抠图模型。
 - 本地只裁掉透明空白并执行 Alpha 与边界质量检查，不会推断前景蒙版。
 - 没有真实 Alpha、带底色、内容为空或触碰图片边界的素材会被拒绝，也不会上传到 Figma。
+- 每个运行日期只使用一个名为 `金融运营素材 YYYY-MM-DD` 的 ChatGPT 项目，每个设计方向只使用一个聊天。项目 URL 和方向聊天 URL 都会写入清单，失败重试或断点恢复时继续原聊天，不会为拆图或单个素材另外新建聊天。
 - 流水线从 `run.json` 和 `figma-manifest.json` 恢复，避免重复采集、重复生成和重复创建 Figma 日期分区。
 - 参考图按类型采集：弹窗、Banner、浮窗分别使用匹配的关键词池和数量配额，不混用搜索词。
 - `reference-history.json` 长期记录已采集 Pin 和图片指纹；后续运行会跳过历史 Pin 和相同图片并继续滚动检索，不会误删仅仅版式相似的素材。
@@ -123,6 +126,8 @@ codex plugin add finance-creative-pipeline@<marketplace-name>
 | `generation.directionCount` | 原创方向数量 |
 | `generation.maxRetries` | 单方向最大重试次数 |
 | `generation.imageTimeoutMinutes` | 单次生图等待上限，默认 5 分钟 |
+| `chatgpt.dailyProjects` | 是否每天创建或复用一个 ChatGPT 日期项目，默认开启 |
+| `chatgpt.projectNamePrefix` | 日期项目前缀，默认 `金融运营素材` |
 | `transparentAssets.maxAssets` | 单方向最多拆出的复杂视觉素材数，默认 4 |
 | `transparentAssets.timeoutMinutes` | 每个独立素材等待 ChatGPT 的上限，默认 10 分钟 |
 | `transparentAssets.maxCorrectionAttempts` | 单素材透明度检查失败后的纠错重生次数，默认 1 |
@@ -203,7 +208,9 @@ YYYY-MM-DD/
 ```bash
 npm run setup          # 打开首次登录流程
 npm run test-run       # 3 张参考图、1 个方向的测试运行
+npm run test-three-types # 弹窗、Banner、浮窗各 1 个的隔离验证运行
 npm run test-transparent-assets -- --image /path/to/preview.png # 只测试透明素材拆分
+npm run find-remix-icon -- --query "shield check" --style line # 检索 Remix Icon SVG
 npm run run            # 20 张参考图、10 个方向的正式运行
 npm run check-missed   # 检查漏跑
 npm run check          # 运行语法检查和自动化测试
@@ -218,6 +225,8 @@ npm run check          # 运行语法检查和自动化测试
 - 不将不透明、空白、跨格或质量检查失败的结果伪装成透明独立素材。
 - 不提交用户配置、登录数据或每日运行产物。
 
+普通功能图标使用 Remix Icon 4.9.1，遵循该版本随包提供的开源许可证。Remix Icon 只用于功能性或信息性图标，不用于 Logo、商标或品牌标识。
+
 ---
 
 ## English
@@ -228,9 +237,10 @@ Finance Creative Pipeline is a Codex plugin for daily Chinese internet-finance o
 
 1. Collects higher-resolution visible references from Huaban Pin detail pages through a persistent Chrome profile, preserving source URLs and dimensions.
 2. Uses ChatGPT Web to analyze the references and generate one brand-neutral, complete preview per direction.
-3. Sends each preview back to ChatGPT Web to identify complex visual elements and produce a semantic `layers.json` plan.
-4. Uses a separate ChatGPT task for each non-reconstructable complex visual and saves each result as its own transparent PNG.
-5. Syncs previews, accepted transparent assets, and native text/geometry into Figma.
+3. Creates or reuses one dated project per day and keeps preview generation, decomposition, and transparent-asset extraction for each direction in one project chat.
+4. Sends each preview back in the same chat to identify complex visual elements and produce a semantic `layers.json` plan.
+5. Uses a separate image task in that chat for each non-reconstructable complex visual and saves each result as its own transparent PNG.
+6. Syncs previews, accepted transparent assets, and native text/geometry into Figma.
 
 A normal run collects 20 references and generates 10 original directions: six popups, two banners, and two floating creatives.
 
@@ -240,9 +250,11 @@ A normal run collects 20 references and generates 10 original directions: six po
 - Generate exactly one complete preview; never combine multiple extracted assets into one sheet or image.
 - Popup directions generate only the popup body with a clean outer safety margin. They must not generate an App page, search bar, navigation, bottom tabs, page cards, or a blurred interface background.
 - Only complex hero visuals, 3D objects, people, mascots, and non-reconstructable illustrations become PNG assets. Cards, buttons, ordinary icons, charts, and simple decorations stay native in Figma.
+- Match ordinary functional icons against official [Remix Icon](https://remixicon.com/) SVGs first and import them as editable Figma vectors instead of hand-drawing temporary icons or using generic placeholders.
 - ChatGPT must extract each selected element separately while preserving its original shape, proportions, color, lighting, and details; no Apple Vision or downloaded local matting model is used.
 - Local processing only trims transparent margins and validates Alpha and image boundaries.
 - Opaque, colored-background, empty, or boundary-touching assets are rejected and never uploaded to Figma.
+- Each run date uses one ChatGPT project named `金融运营素材 YYYY-MM-DD`, with exactly one chat per design direction. Project and direction-chat URLs are persisted so retries and resumed runs continue the original chat instead of creating decomposition or per-asset chats.
 - Resume from `run.json` and `figma-manifest.json` to avoid duplicate collection, generation, or dated Figma sections.
 - Collect popup, Banner, and floating-window references from separate type-matched keyword pools and quotas.
 - Keep accepted Pin IDs and image fingerprints in `reference-history.json`; later runs skip historical Pins and identical images and continue scrolling, without rejecting merely similar layouts.
@@ -329,6 +341,8 @@ User configuration lives outside the repository and should never be committed:
 | `generation.directionCount` | Number of original directions |
 | `generation.maxRetries` | Maximum retries per direction |
 | `generation.imageTimeoutMinutes` | Maximum wait per image-generation attempt; defaults to 5 minutes |
+| `chatgpt.dailyProjects` | Create or reuse one dated ChatGPT project per day; enabled by default |
+| `chatgpt.projectNamePrefix` | Prefix for dated project names; defaults to `金融运营素材` |
 | `transparentAssets.maxAssets` | Maximum non-reconstructable complex assets per direction; defaults to 4 |
 | `transparentAssets.timeoutMinutes` | ChatGPT wait limit for each separate asset; defaults to 10 minutes |
 | `transparentAssets.maxCorrectionAttempts` | Corrective regeneration attempts per rejected asset; defaults to 1 |
@@ -409,7 +423,9 @@ See [`skills/finance-creative-pipeline/references/figma-sync.md`](skills/finance
 ```bash
 npm run setup          # Open first-login setup
 npm run test-run       # Test with 3 references and 1 direction
+npm run test-three-types # Isolated validation with one popup, Banner, and float
 npm run test-transparent-assets -- --image /path/to/preview.png # Test transparent separation only
+npm run find-remix-icon -- --query "shield check" --style line # Search Remix Icon SVGs
 npm run run            # Normal 20-reference, 10-direction run
 npm run check-missed   # Check for a missed scheduled run
 npm run check          # Run syntax checks and automated tests
@@ -423,3 +439,5 @@ npm run check          # Run syntax checks and automated tests
 - Do not generate real logos, real company names, fixed returns, guaranteed approvals, fabricated regulatory endorsements, or other misleading financial claims.
 - Never present opaque, colored-background, empty, boundary-touching, or rejected images as valid transparent assets.
 - Never commit user configuration, authentication data, or daily run artifacts.
+
+Ordinary functional icons use Remix Icon 4.9.1 under the open-source license included with that package. Remix Icon is used only for functional or informational symbols, never as a logo, trademark, or brand identity.

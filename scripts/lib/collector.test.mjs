@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildSearchPlans, isSameImage } from "./collector.mjs";
+import { buildSearchPlans, buildSearchPlansForTypes, isSameImage } from "./collector.mjs";
 
 test("default search plan preserves type quotas", () => {
   const plans = buildSearchPlans({}, 20, "2026-08-04");
@@ -19,6 +19,18 @@ test("small test runs use only popup references", () => {
   assert.deepEqual(plans.map(({ type, count }) => ({ type, count })), [
     { type: "popup", count: 3 }
   ]);
+});
+
+test("three-type validation uses two references from each matching keyword pool", () => {
+  const plans = buildSearchPlansForTypes({}, ["popup", "banner", "float"]);
+  assert.deepEqual(plans.map(({ type, count }) => ({ type, count })), [
+    { type: "popup", count: 2 },
+    { type: "banner", count: 2 },
+    { type: "float", count: 2 }
+  ]);
+  assert.ok(plans[0].keywords.every((keyword) => /弹窗/.test(keyword)));
+  assert.ok(plans[1].keywords.every((keyword) => /banner|横幅/i.test(keyword)));
+  assert.ok(plans[2].keywords.every((keyword) => /浮窗|悬浮|浮标/.test(keyword)));
 });
 
 test("duplicate detection rejects only the same image", () => {

@@ -3,6 +3,10 @@
   "chromeExecutable": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   "profileDirectory": "~/Library/Application Support/Codex/finance-creative-pipeline/chrome-profile",
   "outputRoot": "~/Desktop/互联网金融素材",
+  "chatgpt": {
+    "dailyProjects": true,
+    "projectNamePrefix": "金融运营素材"
+  },
   "figma": {
     "fileKey": "YOUR_FIGMA_FILE_KEY",
     "pageId": "0:1"

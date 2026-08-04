@@ -4,14 +4,31 @@ import {
   activeDirectionFailures,
   analysisPrompt,
   clearDirectionFailure,
+  conversationUrl,
+  dailyProjectName,
   decompositionPrompt,
   previewPrompt,
+  projectBaseUrl,
   recordDirectionFailure,
   requiresUserAction,
   separateAssetCorrectionPrompt,
   separateAssetPrompt,
   selectReferencePair
 } from "./chatgpt-web.mjs";
+
+test("daily ChatGPT projects and direction chat URLs are deterministic", () => {
+  assert.equal(dailyProjectName({}, "2026-08-04"), "金融运营素材 2026-08-04");
+  assert.equal(
+    dailyProjectName({ chatgpt: { projectNamePrefix: "运营设计" } }, "2026-08-04"),
+    "运营设计 2026-08-04"
+  );
+  const projectUrl = "https://chatgpt.com/g/g-p-abc-finance/project";
+  const chatUrl = "https://chatgpt.com/g/g-p-abc-finance/c/conversation-id?messageId=latest";
+  assert.equal(projectBaseUrl(projectUrl), "https://chatgpt.com/g/g-p-abc-finance");
+  assert.equal(projectBaseUrl(chatUrl), "https://chatgpt.com/g/g-p-abc-finance");
+  assert.equal(conversationUrl(chatUrl), "https://chatgpt.com/g/g-p-abc-finance/c/conversation-id");
+  assert.equal(conversationUrl(projectUrl), null);
+});
 
 test("popup prompts generate and decompose only the popup body", () => {
   const specPrompt = analysisPrompt(1, "popup");
@@ -24,6 +41,15 @@ test("popup prompts generate and decompose only the popup body", () => {
   assert.match(layersPrompt, /只输出属于弹窗本体的图层/);
   assert.match(layersPrompt, /不得创建 Background\/AppInterface/);
   assert.doesNotMatch(layersPrompt, /"id":"background"/);
+});
+
+test("decomposition records searchable Remix Icon semantics instead of invented paths", () => {
+  const layersPrompt = decompositionPrompt(7, 1140, 240, 4, "banner");
+  assert.match(layersPrompt, /每个普通功能图标使用kind=icon/);
+  assert.match(layersPrompt, /query用2到4个简短英文词/);
+  assert.match(layersPrompt, /"query":"shield check"/);
+  assert.match(layersPrompt, /"style":"line"/);
+  assert.match(layersPrompt, /不要臆造图标库文件名/);
 });
 
 test("reference pairs stay inside the requested creative type", () => {

@@ -84,6 +84,17 @@ export function buildSearchPlans(collection, count, date) {
   return plans;
 }
 
+export function buildSearchPlansForTypes(collection, types, countPerType = 2) {
+  const configured = Array.isArray(collection.searchPlans) && collection.searchPlans.length
+    ? collection.searchPlans
+    : DEFAULT_SEARCH_PLANS;
+  return types.map((type) => {
+    const plan = configured.find((item) => item.type === type);
+    if (!plan?.keywords?.length) throw new Error(`配置中缺少 ${type} 类型的搜索词`);
+    return { ...plan, count: countPerType };
+  });
+}
+
 function historyRecord(item, date) {
   return {
     pinId: item.pinId,
