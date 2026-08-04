@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  Daily finance creative collection, ChatGPT Web generation, pixel-level decomposition, and editable Figma delivery.
+  Daily finance creative collection, ChatGPT Web generation, transparent asset separation, and editable Figma delivery.
 </p>
 
 <p align="center">
@@ -22,18 +22,21 @@ Finance Creative Pipeline 是一个面向中国互联网金融运营素材的 Co
 
 1. 使用持久化 Chrome 配置从花瓣 Pin 详情页采集高分辨率可见参考图，并保留来源链接和尺寸信息。
 2. 通过 ChatGPT 网页版分析参考图，并为每个方向生成一张品牌中性的完整预览图。
-3. 将预览图重新提交给 ChatGPT 网页版，生成语义化 `layers.json`。
-4. 使用 Apple Vision 在本地生成像素级前景蒙版，并执行透明度与边界质量检查。
-5. 将预览图、清底背景、通过检查的独立素材和原生文字/几何图层同步到 Figma。
+3. 将预览图重新提交给 ChatGPT 网页版，识别复杂视觉元素并生成语义化 `layers.json`。
+4. 只把无法用 Figma 基础图形可靠重构的复杂主视觉逐个交给 ChatGPT，每个元素单独生成一张透明 PNG。
+5. 将预览图、通过检查的透明独立素材和原生文字/几何图层同步到 Figma。
 
 默认正式运行会采集 20 张参考图并生成 10 个原创方向：6 个弹窗、2 个 Banner、2 个浮窗。
 
 ### 核心原则
 
 - 图片生成必须使用 ChatGPT 网页版，不以 Codex 图片生成作为替代。
-- 每个方向只生成一张完整预览图，不额外要求透明前景图。
-- ChatGPT 只提供语义框和图层描述；透明边缘由 Apple Vision 在本地生成。
-- 未通过抠图质量门槛的素材不会退化为矩形裁切图，也不会上传到 Figma。
+- 每个方向生成一张完整预览图；每个复杂素材都使用独立的 ChatGPT 任务和独立 PNG，不生成多元素素材板。
+- 弹窗方向只生成弹窗本体与干净的外部安全留白，不生成 App 页面、搜索栏、导航栏、底部 Tab、页面卡片或虚化界面背景。
+- 只拆复杂主视觉、3D物体、人物、吉祥物或复杂插画；卡片、按钮、普通图标、图表和简单装饰由 Figma 原生重构。
+- ChatGPT 必须从原图单独提取并保持造型、比例、颜色、光影和细节，不得重新设计；本地不运行 Apple Vision 或其他 AI 抠图模型。
+- 本地只裁掉透明空白并执行 Alpha 与边界质量检查，不会推断前景蒙版。
+- 没有真实 Alpha、带底色、内容为空或触碰图片边界的素材会被拒绝，也不会上传到 Figma。
 - 流水线从 `run.json` 和 `figma-manifest.json` 恢复，避免重复采集、重复生成和重复创建 Figma 日期分区。
 - 参考图按类型采集：弹窗、Banner、浮窗分别使用匹配的关键词池和数量配额，不混用搜索词。
 - `reference-history.json` 长期记录已采集 Pin 和图片指纹；后续运行会跳过历史 Pin 和相同图片并继续滚动检索，不会误删仅仅版式相似的素材。
@@ -41,16 +44,12 @@ Finance Creative Pipeline 是一个面向中国互联网金融运营素材的 Co
 
 ### 环境要求
 
-- macOS 14 或更高版本
 - Node.js 20 或更高版本
-- Xcode Command Line Tools
 - Google Chrome
 - 可用的 ChatGPT 网页版会话
 - 可用的花瓣会话
 - Codex 桌面版及已启用的官方 Figma connector
 - 对目标 Figma 文件的编辑权限
-
-Apple Vision 像素级抠图依赖 `VNGenerateForegroundInstanceMaskRequest`，因此当前不支持 Windows 或 Linux。
 
 ### 快速开始
 
@@ -124,11 +123,13 @@ codex plugin add finance-creative-pipeline@<marketplace-name>
 | `generation.directionCount` | 原创方向数量 |
 | `generation.maxRetries` | 单方向最大重试次数 |
 | `generation.imageTimeoutMinutes` | 单次生图等待上限，默认 5 分钟 |
-| `matting.paddingRatio` | Apple Vision 候选区域外扩比例 |
-| `matting.minForegroundRatio` | 最小前景占比 |
-| `matting.maxForegroundRatio` | 最大前景占比 |
-| `matting.minTransparentRatio` | 最小透明像素占比 |
-| `matting.maxBorderForegroundRatio` | 最大边界前景占比 |
+| `transparentAssets.maxAssets` | 单方向最多拆出的复杂视觉素材数，默认 4 |
+| `transparentAssets.timeoutMinutes` | 每个独立素材等待 ChatGPT 的上限，默认 10 分钟 |
+| `transparentAssets.maxCorrectionAttempts` | 单素材透明度检查失败后的纠错重生次数，默认 1 |
+| `transparentAssets.minForegroundRatio` | 单素材最小前景占比 |
+| `transparentAssets.maxForegroundRatio` | 单素材最大前景占比 |
+| `transparentAssets.minTransparentRatio` | 单素材最小透明像素占比 |
+| `transparentAssets.maxBorderForegroundRatio` | 图片边界允许的最大前景占比 |
 
 完整示例见 [`assets/config.example.json`](assets/config.example.json)。
 
@@ -167,8 +168,7 @@ YYYY-MM-DD/
         ├── layers.json
         └── layers/
             ├── decomposition-report.json
-            ├── background-clean.png
-            └── *.png
+            └── NN-layer-id.png
 ```
 
 输出根目录还会维护 `reference-history.json`，长期保存已接受的 Pin ID、aHash、来源、尺寸和采集日期。每日运行会先读取该台账，再向下滚动寻找未采集内容。
@@ -176,9 +176,8 @@ YYYY-MM-DD/
 - `preview.png`：完整、扁平化的最终预览。
 - `spec.json`：方向构图、配色、组件和文案。
 - `layers.json`：ChatGPT 输出的语义图层计划。
-- `decomposition-report.json`：本地抠图结果、质量指标、警告和限制。
-- `background-clean.png`：仅在文字背景可以安全修复时生成。
-- `layers/*.png`：通过 Apple Vision 质量检查的透明前景素材。
+- `decomposition-report.json`：每个独立素材的 Alpha、边界质量、警告和限制。
+- `layers/*.png`：ChatGPT 分别生成并通过质量检查的独立透明素材。
 
 ### Figma 交付规范
 
@@ -187,10 +186,9 @@ YYYY-MM-DD/
 - `Preview`：左侧完整预览图。
 - `Editable`：右侧可见的可编辑重建。
 - `Visual Base`：锁定但隐藏，只作为核对参考，不能作为右侧可见交付。
-- `Background Clean`：存在时显示在可编辑元素下方。
-- `Editable Elements`：通过检查的独立素材、原生文字、卡片、按钮和简单几何图层。
+- `Editable Elements`：通过检查的 ChatGPT 透明素材、原生文字、卡片、按钮和简单几何图层；Banner 和浮窗可包含自身背景。
 
-没有清底背景时，右侧使用 `spec.json.palette` 的第一个颜色作为原生背景。Figma 完成前必须逐方向截图，并检查：
+弹窗右侧画布保持透明，只重构弹窗卡片、阴影、贴附主视觉和卡内元素，不还原弹窗后方的页面界面。Banner 和浮窗没有清底背景时，可使用 `spec.json.palette` 的第一个颜色作为原生背景。Figma 完成前必须逐方向截图，并检查：
 
 - 左右两侧不是同一张扁平图。
 - 没有重复 OCR、文字溢出或错误换行。
@@ -205,18 +203,10 @@ YYYY-MM-DD/
 ```bash
 npm run setup          # 打开首次登录流程
 npm run test-run       # 3 张参考图、1 个方向的测试运行
+npm run test-transparent-assets -- --image /path/to/preview.png # 只测试透明素材拆分
 npm run run            # 20 张参考图、10 个方向的正式运行
 npm run check-missed   # 检查漏跑
-npm run check          # 检查 Node.js 和 Objective-C 语法
-```
-
-单独重新执行图片分解：
-
-```bash
-npm run decompose-image -- \
-  --image /path/to/preview.png \
-  --layers /path/to/layers.json \
-  --out /path/to/output/layers
+npm run check          # 运行语法检查和自动化测试
 ```
 
 ### 安全与合规
@@ -225,7 +215,7 @@ npm run decompose-image -- \
 - 不自动处理验证码、WAF、安全验证、付费限制或下载限制。
 - 只从 Pin 详情页公开可见图片元素下载预览图，并保留列表缩略图、最终图片和 Pin 来源 URL。
 - 不生成真实品牌 Logo、真实公司名称、固定收益、保证审批、监管背书或其他误导性金融承诺。
-- 不将拒绝的抠图结果伪装成透明独立素材。
+- 不将不透明、空白、跨格或质量检查失败的结果伪装成透明独立素材。
 - 不提交用户配置、登录数据或每日运行产物。
 
 ---
@@ -238,18 +228,21 @@ Finance Creative Pipeline is a Codex plugin for daily Chinese internet-finance o
 
 1. Collects higher-resolution visible references from Huaban Pin detail pages through a persistent Chrome profile, preserving source URLs and dimensions.
 2. Uses ChatGPT Web to analyze the references and generate one brand-neutral, complete preview per direction.
-3. Sends each preview back to ChatGPT Web to produce a semantic `layers.json` plan.
-4. Uses Apple Vision locally for pixel-level foreground masks and enforces alpha and boundary quality gates.
-5. Syncs previews, cleaned backgrounds, accepted isolated assets, and native text/geometry into Figma.
+3. Sends each preview back to ChatGPT Web to identify complex visual elements and produce a semantic `layers.json` plan.
+4. Uses a separate ChatGPT task for each non-reconstructable complex visual and saves each result as its own transparent PNG.
+5. Syncs previews, accepted transparent assets, and native text/geometry into Figma.
 
 A normal run collects 20 references and generates 10 original directions: six popups, two banners, and two floating creatives.
 
 ### Design Principles
 
 - Image generation must use ChatGPT Web. Codex image generation is not a fallback.
-- Generate exactly one complete preview per direction; do not request separate transparent foreground images.
-- ChatGPT provides semantic regions and layer descriptions only. Apple Vision creates transparent edges locally.
-- Failed mattes are never replaced with rectangular crops and are never uploaded to Figma.
+- Generate exactly one complete preview; never combine multiple extracted assets into one sheet or image.
+- Popup directions generate only the popup body with a clean outer safety margin. They must not generate an App page, search bar, navigation, bottom tabs, page cards, or a blurred interface background.
+- Only complex hero visuals, 3D objects, people, mascots, and non-reconstructable illustrations become PNG assets. Cards, buttons, ordinary icons, charts, and simple decorations stay native in Figma.
+- ChatGPT must extract each selected element separately while preserving its original shape, proportions, color, lighting, and details; no Apple Vision or downloaded local matting model is used.
+- Local processing only trims transparent margins and validates Alpha and image boundaries.
+- Opaque, colored-background, empty, or boundary-touching assets are rejected and never uploaded to Figma.
 - Resume from `run.json` and `figma-manifest.json` to avoid duplicate collection, generation, or dated Figma sections.
 - Collect popup, Banner, and floating-window references from separate type-matched keyword pools and quotas.
 - Keep accepted Pin IDs and image fingerprints in `reference-history.json`; later runs skip historical Pins and identical images and continue scrolling, without rejecting merely similar layouts.
@@ -257,16 +250,12 @@ A normal run collects 20 references and generates 10 original directions: six po
 
 ### Requirements
 
-- macOS 14 or later
 - Node.js 20 or later
-- Xcode Command Line Tools
 - Google Chrome
 - An active ChatGPT Web session
 - An active Huaban session
 - Codex desktop with the official Figma connector enabled
 - Edit access to the target Figma file
-
-Pixel-level matting uses Apple Vision's `VNGenerateForegroundInstanceMaskRequest`, so Windows and Linux are not currently supported.
 
 ### Quick Start
 
@@ -340,11 +329,13 @@ User configuration lives outside the repository and should never be committed:
 | `generation.directionCount` | Number of original directions |
 | `generation.maxRetries` | Maximum retries per direction |
 | `generation.imageTimeoutMinutes` | Maximum wait per image-generation attempt; defaults to 5 minutes |
-| `matting.paddingRatio` | Padding around Apple Vision regions of interest |
-| `matting.minForegroundRatio` | Minimum foreground ratio |
-| `matting.maxForegroundRatio` | Maximum foreground ratio |
-| `matting.minTransparentRatio` | Minimum transparent pixel ratio |
-| `matting.maxBorderForegroundRatio` | Maximum foreground ratio along asset borders |
+| `transparentAssets.maxAssets` | Maximum non-reconstructable complex assets per direction; defaults to 4 |
+| `transparentAssets.timeoutMinutes` | ChatGPT wait limit for each separate asset; defaults to 10 minutes |
+| `transparentAssets.maxCorrectionAttempts` | Corrective regeneration attempts per rejected asset; defaults to 1 |
+| `transparentAssets.minForegroundRatio` | Minimum foreground ratio per asset |
+| `transparentAssets.maxForegroundRatio` | Maximum foreground ratio per asset |
+| `transparentAssets.minTransparentRatio` | Minimum transparent-pixel ratio per asset |
+| `transparentAssets.maxBorderForegroundRatio` | Maximum foreground ratio along image borders |
 
 See [`assets/config.example.json`](assets/config.example.json) for the complete example.
 
@@ -385,16 +376,14 @@ YYYY-MM-DD/
         ├── layers.json
         └── layers/
             ├── decomposition-report.json
-            ├── background-clean.png
-            └── *.png
+            └── NN-layer-id.png
 ```
 
 - `preview.png`: complete flattened preview.
 - `spec.json`: composition, palette, components, and copy.
 - `layers.json`: semantic layer plan produced by ChatGPT Web.
-- `decomposition-report.json`: local matting results, quality metrics, warnings, and limitations.
-- `background-clean.png`: generated only when text regions can be repaired safely.
-- `layers/*.png`: transparent foreground assets accepted by the Apple Vision quality gate.
+- `decomposition-report.json`: per-asset Alpha and boundary metrics, warnings, and limitations.
+- `layers/*.png`: independently generated transparent assets accepted by the quality gate.
 
 ### Figma Delivery Contract
 
@@ -403,10 +392,9 @@ Each direction uses a side-by-side layout:
 - `Preview`: complete flattened preview on the left.
 - `Editable`: visible editable reconstruction on the right.
 - `Visual Base`: locked and hidden reference only; it must not be used as the visible right-side delivery.
-- `Background Clean`: visible behind editable elements when available.
-- `Editable Elements`: accepted isolated assets, native text, cards, buttons, and simple geometry.
+- `Editable Elements`: accepted ChatGPT-separated transparent assets plus native text, cards, buttons, and simple geometry; Banner and float directions may include their own backgrounds.
 
-When no cleaned background exists, the right side uses the first color in `spec.json.palette` as a native background. Before completion, screenshot every direction and verify:
+Popup editable canvases stay transparent and reconstruct only the popup card, shadow, attached hero, and internal elements; the page behind the popup is never rebuilt. Banner and float directions may use the first color in `spec.json.palette` when no cleaned background exists. Before completion, screenshot every direction and verify:
 
 - The left and right sides are not the same flattened image.
 - OCR is not duplicated, clipped, or wrapped incorrectly.
@@ -421,18 +409,10 @@ See [`skills/finance-creative-pipeline/references/figma-sync.md`](skills/finance
 ```bash
 npm run setup          # Open first-login setup
 npm run test-run       # Test with 3 references and 1 direction
+npm run test-transparent-assets -- --image /path/to/preview.png # Test transparent separation only
 npm run run            # Normal 20-reference, 10-direction run
 npm run check-missed   # Check for a missed scheduled run
-npm run check          # Validate Node.js and Objective-C syntax
-```
-
-Run decomposition directly:
-
-```bash
-npm run decompose-image -- \
-  --image /path/to/preview.png \
-  --layers /path/to/layers.json \
-  --out /path/to/output/layers
+npm run check          # Run syntax checks and automated tests
 ```
 
 ### Security and Compliance
@@ -441,5 +421,5 @@ npm run decompose-image -- \
 - Never bypass CAPTCHA, WAF, security interstitials, paywalls, or download restrictions.
 - Download only previews exposed by visible image elements on Huaban Pin detail pages, preserving the list thumbnail, selected image, and Pin source URLs.
 - Do not generate real logos, real company names, fixed returns, guaranteed approvals, fabricated regulatory endorsements, or other misleading financial claims.
-- Never present rejected mattes as valid transparent assets.
+- Never present opaque, colored-background, empty, boundary-touching, or rejected images as valid transparent assets.
 - Never commit user configuration, authentication data, or daily run artifacts.

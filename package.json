@@ -7,10 +7,10 @@
     "setup": "node scripts/setup-login.mjs",
     "run": "node scripts/run.mjs",
     "test-run": "node scripts/run.mjs --test",
+    "test-transparent-assets": "node scripts/test-transparent-assets.mjs",
     "check-missed": "node scripts/check-missed.mjs",
     "mark-figma-complete": "node scripts/mark-figma-complete.mjs",
-    "decompose-image": "node scripts/decompose-image.mjs",
-    "check": "node --check scripts/run.mjs && node --check scripts/setup-login.mjs && node --check scripts/check-missed.mjs && node --check scripts/mark-figma-complete.mjs && node --check scripts/decompose-image.mjs && node --check scripts/lib/collector.mjs && node --check scripts/lib/chatgpt-web.mjs && node --test scripts/lib/collector.test.mjs scripts/lib/chatgpt-web.test.mjs && xcrun clang -fobjc-arc -fmodules -fmodules-cache-path=/tmp/finance-creative-pipeline-clang-modules -mmacosx-version-min=14.0 -fsyntax-only scripts/matte-foreground.m"
+    "check": "node --check scripts/run.mjs && node --check scripts/setup-login.mjs && node --check scripts/check-missed.mjs && node --check scripts/mark-figma-complete.mjs && node --check scripts/test-transparent-assets.mjs && node --check scripts/lib/transparent-assets.mjs && node --check scripts/lib/collector.mjs && node --check scripts/lib/chatgpt-web.mjs && node --test scripts/lib/collector.test.mjs scripts/lib/chatgpt-web.test.mjs scripts/lib/transparent-assets.test.mjs"
   },
   "dependencies": {
     "playwright-core": "^1.54.2",

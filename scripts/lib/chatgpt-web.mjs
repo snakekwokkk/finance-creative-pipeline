@@ -1,12 +1,15 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import { pluginRoot } from "./config.mjs";
+import sharp from "sharp";
 import { readJson, writeJsonAtomic } from "./state.mjs";
 import { screenshotFailure } from "./browser.mjs";
-
-const execFileAsync = promisify(execFile);
+import {
+  assignAssetIndices,
+  isRasterAsset,
+  reportAssetsReady,
+  validateSeparateAsset,
+  writeDecompositionReport
+} from "./transparent-assets.mjs";
 
 function minuteTimeout(value) {
   return Math.max(1, Number(value || 1)) * 60_000;
@@ -57,8 +60,19 @@ async function ensureLoggedIn(page) {
 }
 
 async function startNewChat(page) {
-  await page.goto("https://chatgpt.com/", { waitUntil: "domcontentloaded", timeout: 60_000 });
-  await composer(page);
+  let lastError;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await page.goto("https://chatgpt.com/", { waitUntil: "domcontentloaded", timeout: 60_000 });
+      await composer(page);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!/ERR_ABORTED|navigation.*interrupted|net::ERR_/i.test(String(error?.message || error)) || attempt === 1) throw error;
+      await page.waitForTimeout(1500);
+    }
+  }
+  throw lastError;
 }
 
 async function attachFiles(page, files) {
@@ -139,12 +153,63 @@ async function sendAndRead(page, prompt, timeout) {
 
 async function visibleImageSources(page) {
   return page.locator("img").evaluateAll((images) => images
-    .filter((image) => image.getBoundingClientRect().width >= 180 && image.getBoundingClientRect().height >= 120)
+    .filter((image) => {
+      const rect = image.getBoundingClientRect();
+      return (image.naturalWidth >= 512 && image.naturalHeight >= 512)
+        || (rect.width >= 100 && rect.height >= 80);
+    })
     .map((image) => image.currentSrc || image.src)
     .filter(Boolean));
 }
 
-async function saveLastAssistantImage(page, file, timeout, previousSources = []) {
+async function waitForImageGenerationToSettle(page, timeout) {
+  const stop = page.locator('[data-testid="stop-button"]');
+  if (await stop.count()) {
+    await stop.first().waitFor({ state: "hidden", timeout }).catch(() => {});
+  }
+  await page.waitForTimeout(1000);
+}
+
+async function downloadedImageIsExcluded(file, excludedFiles) {
+  if (!excludedFiles.length) return false;
+  const candidate = await fs.readFile(file);
+  const candidateFingerprint = await sharp(candidate)
+    .flatten({ background: "white" })
+    .resize(16, 16, { fit: "fill" })
+    .removeAlpha()
+    .raw()
+    .toBuffer();
+  for (const excludedFile of excludedFiles) {
+    try {
+      const excluded = await fs.readFile(excludedFile);
+      if (candidate.equals(excluded)) return true;
+      const excludedFingerprint = await sharp(excluded)
+        .flatten({ background: "white" })
+        .resize(16, 16, { fit: "fill" })
+        .removeAlpha()
+        .raw()
+        .toBuffer();
+      let difference = 0;
+      for (let index = 0; index < candidateFingerprint.length; index += 1) {
+        difference += Math.abs(candidateFingerprint[index] - excludedFingerprint[index]);
+      }
+      if (difference / candidateFingerprint.length < 6) return true;
+    } catch {}
+  }
+  return false;
+}
+
+async function acceptDownloadedImage(page, file, src, previous, excludedFiles, timeout) {
+  if (await downloadedImageIsExcluded(file, excludedFiles)) {
+    await fs.rm(file, { force: true });
+    previous.add(src);
+    return false;
+  }
+  await waitForImageGenerationToSettle(page, timeout);
+  return true;
+}
+
+async function saveLastAssistantImage(page, file, timeout, previousSources = [], excludedFiles = []) {
   const started = Date.now();
   const previous = new Set(previousSources);
   while (Date.now() - started < timeout) {
@@ -158,18 +223,24 @@ async function saveLastAssistantImage(page, file, timeout, previousSources = [])
       if (src?.startsWith("data:")) {
         const base64 = src.slice(src.indexOf(",") + 1);
         await fs.writeFile(file, Buffer.from(base64, "base64"));
-        return;
+        if (await acceptDownloadedImage(page, file, src, previous, excludedFiles, Math.max(1000, timeout - (Date.now() - started)))) return;
+        continue;
       }
       if (src?.startsWith("blob:")) {
-        const base64 = await page.evaluate(async (url) => {
-          const blob = await fetch(url).then((res) => res.blob());
-          const bytes = new Uint8Array(await blob.arrayBuffer());
-          let binary = "";
-          for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
-          return btoa(binary);
-        }, src);
-        await fs.writeFile(file, Buffer.from(base64, "base64"));
-        return;
+        try {
+          const base64 = await page.evaluate(async (url) => {
+            const blob = await fetch(url).then((res) => res.blob());
+            const bytes = new Uint8Array(await blob.arrayBuffer());
+            let binary = "";
+            for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
+            return btoa(binary);
+          }, src);
+          await fs.writeFile(file, Buffer.from(base64, "base64"));
+          if (await acceptDownloadedImage(page, file, src, previous, excludedFiles, Math.max(1000, timeout - (Date.now() - started)))) return;
+          continue;
+        } catch {
+          previous.add(src);
+        }
       }
       if (src) {
         const inPage = await page.evaluate(async (url) => {
@@ -188,13 +259,15 @@ async function saveLastAssistantImage(page, file, timeout, previousSources = [])
         }, src);
         if (inPage.ok) {
           await fs.writeFile(file, Buffer.from(inPage.base64, "base64"));
-          return;
+          if (await acceptDownloadedImage(page, file, src, previous, excludedFiles, Math.max(1000, timeout - (Date.now() - started)))) return;
+          continue;
         }
         try {
           const downloaded = await page.context().request.get(src, { timeout: 120_000 });
           if (downloaded.ok()) {
             await fs.writeFile(file, await downloaded.body());
-            return;
+            if (await acceptDownloadedImage(page, file, src, previous, excludedFiles, Math.max(1000, timeout - (Date.now() - started)))) return;
+            continue;
           }
         } catch {}
       }
@@ -204,16 +277,40 @@ async function saveLastAssistantImage(page, file, timeout, previousSources = [])
   throw new Error("等待 ChatGPT 生成图片超时");
 }
 
-function analysisPrompt(index) {
-  return `你是一名中国互联网金融运营视觉设计师。分析我上传的两张参考图，但不得复制真实品牌Logo、品牌名、原文案或完全相同版式。为第${index}套方向输出品牌中性的原创设计规格。\n\n只输出以下标记包裹的合法JSON，不要增加解释：\nFINANCE_SPEC_START\n{\n  "keywords": ["视觉关键词"],\n  "composition": "构图描述",\n  "palette": ["#RRGGBB"],\n  "components": ["Background", "Decorations", "Icon", "Title", "Subtitle", "CTA"],\n  "typography": "字体气质",\n  "copy": {"title": "原创标题", "subtitle": "原创副标题", "cta": "按钮文案"},\n  "imagePrompt": "用于生成完整运营设计的中文提示词"\n}\nFINANCE_SPEC_END\n\n文案不得承诺必下款、百分百审批、固定收益或伪造监管背书。`;
+export function analysisPrompt(index, type) {
+  const popupRule = type === "popup"
+    ? "\n\n这是弹窗方向，只分析和设计弹窗本体：弹窗卡片、卡内内容、贴附或越出卡片的主视觉、阴影、按钮及属于弹窗的装饰。不要把参考图中的 App 页面、搜索栏、导航、侧边卡片、行情面板、底部 Tab 或其他环境背景写入 composition、components 或 imagePrompt。"
+    : "";
+  const components = type === "popup"
+    ? '["Popup Card", "Attached Hero", "Decorations", "Icon", "Title", "Subtitle", "CTA"]'
+    : '["Background", "Decorations", "Icon", "Title", "Subtitle", "CTA"]';
+  return `你是一名中国互联网金融运营视觉设计师。分析我上传的两张参考图，但不得复制真实品牌Logo、品牌名、原文案或完全相同版式。为第${index}套方向输出品牌中性的原创设计规格。${popupRule}\n\n只输出以下标记包裹的合法JSON，不要增加解释：\nFINANCE_SPEC_START\n{\n  "keywords": ["视觉关键词"],\n  "composition": "构图描述",\n  "palette": ["#RRGGBB"],\n  "components": ${components},\n  "typography": "字体气质",\n  "copy": {"title": "原创标题", "subtitle": "原创副标题", "cta": "按钮文案"},\n  "imagePrompt": "用于生成完整运营设计的中文提示词"\n}\nFINANCE_SPEC_END\n\n文案不得承诺必下款、百分百审批、固定收益或伪造监管背书。`;
 }
 
-function previewPrompt(spec, width, height) {
-  return `请根据下面的规格直接生成一张完整的中国互联网金融运营设计图，画布比例约为 ${width}:${height}。保持品牌中性，不出现任何真实公司名称、Logo、二维码、手机号或夸大审批承诺。中文文字应清晰，整体原创。\n\n${JSON.stringify(spec, null, 2)}`;
+export function previewPrompt(spec, width, height, type) {
+  const popupRule = type === "popup"
+    ? "\n\n这是一张弹窗素材，不是完整 App 页面。只生成一个完整弹窗本体，包括弹窗卡片、阴影、贴附或越出卡片的主视觉、卡内文字、图标、数据面板和按钮。弹窗外部只留均匀、干净的纯色空白安全区，不生成或暗示 App 页面、搜索栏、导航栏、底部 Tab、页面卡片、信息流、页面图表或其他界面背景，也不要用虚化页面填充弹窗后方。让弹窗主体尽量占满画布并保持完整，不要裁切。"
+    : "";
+  return `请根据下面的规格直接生成一张完整的中国互联网金融运营设计图，画布比例约为 ${width}:${height}。保持品牌中性，不出现任何真实公司名称、Logo、二维码、手机号或夸大审批承诺。中文文字应清晰，整体原创。${popupRule}\n\n${JSON.stringify(spec, null, 2)}`;
 }
 
-function decompositionPrompt(index, width, height) {
-  return `你是一名负责UI拆图和审图的视觉分析师。下面上传的是刚生成的第${index}套完整运营设计图，画布为 ${width}x${height}。请只分析这张图，不要生成新图片。目标是生成可由像素级抠图和Figma原生图层重组的语义计划。\n\n识别背景、卡片、主视觉素材、插画、角标、徽章、Icon、装饰、按钮和所有可编辑文字。每个图层输出归一化0到1的bbox（x,y,width,height），bbox应完整包住当前可见对象并尽量排除相邻对象。不要输出polygon或mask points：边缘由本地像素级前景分割生成。editable只能是background、raster、vector或text；照片、复杂插画和复杂装饰用raster，简单卡片、按钮、几何图形和可重建Icon用vector。文字必须输出原文、字体气质、字号相对等级、颜色、对齐和安全的背景修复颜色；如果文字背后有渐变、纹理或复杂素材，repair.type必须是none。\n\n只输出以下标记包裹的合法JSON，不要解释：\nDECOMPOSE_START\n{\n  "schemaVersion": 2,\n  "canvas": {"width": ${width}, "height": ${height}},\n  "layers": [\n    {\n      "id": "background",\n      "role": "Background",\n      "kind": "background",\n      "bbox": {"x": 0, "y": 0, "width": 1, "height": 1},\n      "editable": "background",\n      "confidence": 0.98\n    },\n    {\n      "id": "hero",\n      "role": "Visual/Hero",\n      "kind": "illustration",\n      "bbox": {"x": 0.18, "y": 0.2, "width": 0.64, "height": 0.45},\n      "editable": "raster",\n      "confidence": 0.9\n    },\n    {\n      "id": "title",\n      "role": "Copy/Title",\n      "kind": "text",\n      "bbox": {"x": 0.2, "y": 0.7, "width": 0.6, "height": 0.08},\n      "text": "图中原文",\n      "typography": {"sizeLevel": "large", "weight": "bold", "color": "#000000", "align": "center"},\n      "repair": {"type": "solid", "color": "#FFFFFF"},\n      "editable": "text",\n      "confidence": 0.9\n    }\n  ]\n}\nDECOMPOSE_END\n\n不要改写图中文字，不要补充看不清的文案，不要输出多边形蒙版，不要把一整张图标成单一插画层。`;
+export function decompositionPrompt(index, width, height, maxAssets, type) {
+  const popupRule = type === "popup"
+    ? "\n\n这是弹窗方向。只输出属于弹窗本体的图层：弹窗主卡片、卡片阴影、贴附或越出卡片的主视觉、卡内面板、按钮、文字、图标和装饰。忽略弹窗外的纯色空白及任何残余页面环境，不得创建 Background/AppInterface、Page、SearchBar、Navigation、BottomTab、Feed、页面卡片或其他背景界面图层。弹窗主卡片是内容根节点，用 card/vector 表示，不要为弹窗外画布创建 background 图层。"
+    : "";
+  const firstLayer = type === "popup"
+    ? '{"id":"modal_card","role":"Container/MainCard","kind":"card","bbox":{"x":0.16,"y":0.15,"width":0.68,"height":0.72},"editable":"vector","zIndex":10,"confidence":0.98}'
+    : '{"id":"background","role":"Background","kind":"background","bbox":{"x":0,"y":0,"width":1,"height":1},"editable":"background","zIndex":0,"confidence":0.98}';
+  return `分析第${index}套完整运营图（${width}x${height}），输出供 Figma 重构的图层 JSON。识别背景、卡片、按钮、文字、图标、装饰和主视觉，并为每层提供0到1的bbox、zIndex和confidence。${popupRule}\n\neditable只能是background、raster、vector或text。只有无法用 Figma 文字和基础矢量可靠重构、且必须保留原图细节的复杂主视觉、3D物体、人物、吉祥物或复杂插画才用raster，最多 ${maxAssets} 个；卡片、按钮、普通图标、图表、线条、光轨和简单装饰都用vector，文字用text。不要为了多拆图而把可重构元素标成raster。每个raster只需用assetPrompt简短指出要从原图提取的主体及其自带光影。\n\n只输出以下标记包裹的合法JSON，不要解释：\nDECOMPOSE_START\n{\n  "schemaVersion": 4,\n  "canvas": {"width": ${width}, "height": ${height}},\n  "layers": [\n    ${firstLayer},\n    {"id":"hero","role":"Visual/Hero","kind":"illustration","bbox":{"x":0.18,"y":0.2,"width":0.64,"height":0.45},"assetPrompt":"主视觉及其自带光影","editable":"raster","zIndex":20,"confidence":0.9},\n    {"id":"title","role":"Copy/Title","kind":"text","bbox":{"x":0.2,"y":0.7,"width":0.6,"height":0.08},"text":"图中原文","typography":{"sizeLevel":"large","weight":"bold","color":"#000000","align":"center"},"editable":"text","zIndex":40,"confidence":0.9}\n  ]\n}\nDECOMPOSE_END\n\n不要改写文字，不要猜看不清的内容，不要输出蒙版或多边形。`;
+}
+
+export function separateAssetPrompt(layer) {
+  const subject = layer.assetPrompt || layer.role || layer.id;
+  return `将原图中的“${subject}”单独导出为透明背景高清 PNG，保持造型、比例、颜色、光影和细节与原图一致；不要重绘，不要其他元素、底色、色雾或棋盘格。直接生成图片。`;
+}
+
+export function separateAssetCorrectionPrompt(layer, reason) {
+  return `上一张“${layer.assetPrompt || layer.role || layer.id}”不合格：${reason}。请重新从原图单独提取，保持原样，只输出真实透明背景 PNG，不要底色、棋盘格或其他元素。`;
 }
 
 export function selectReferencePair(references, type, typeIndex) {
@@ -244,31 +341,76 @@ export function requiresUserAction(error) {
     .test(String(error?.message || error));
 }
 
-async function decomposePreview(page, config, previewFile, directionDir, index, width, height) {
+export async function decomposePreview(page, config, previewFile, directionDir, index, width, height, type) {
   const layersFile = path.join(directionDir, "layers.json");
-  const reportFile = path.join(directionDir, "layers", "decomposition-report.json");
+  const outputDir = path.join(directionDir, "layers");
+  const reportFile = path.join(outputDir, "decomposition-report.json");
   const cached = await readJson(layersFile);
   const cachedReport = await readJson(reportFile);
-  if (cached?.schemaVersion >= 2 && cached?.layers?.length && cachedReport?.schemaVersion >= 2) return cached;
+  if (cached?.schemaVersion >= 4 && cached?.layers?.length && await reportAssetsReady(cachedReport)) return cached;
+  const decompositionTimeout = config.generation.decompositionTimeoutMinutes || config.generation.analysisTimeoutMinutes;
+  const assetConfig = config.transparentAssets || {};
+  const maxAssets = assetConfig.maxAssets ?? 4;
   await startNewChat(page);
   await attachFiles(page, [previewFile]);
-  const decompositionTimeout = config.generation.decompositionTimeoutMinutes || config.generation.analysisTimeoutMinutes;
-  const analysis = await sendAndRead(page, decompositionPrompt(index, width, height), minuteTimeout(decompositionTimeout));
-  const layers = extractMarkedJson(analysis.text, "DECOMPOSE_START", "DECOMPOSE_END");
-  await fs.writeFile(path.join(directionDir, "decomposition-analysis.txt"), analysis.text, "utf8");
+  let layers = cached?.schemaVersion >= 4 && cached?.layers?.length ? cached : null;
+  if (!layers) {
+    let analysis = await sendAndRead(page, decompositionPrompt(index, width, height, maxAssets, type), minuteTimeout(decompositionTimeout));
+    const analysisFile = path.join(directionDir, "decomposition-analysis.txt");
+    await fs.writeFile(analysisFile, analysis.text, "utf8");
+    let parsed;
+    try {
+      parsed = extractMarkedJson(analysis.text, "DECOMPOSE_START", "DECOMPOSE_END");
+    } catch {
+      const repair = await sendAndRead(page, "上一条回复没有包含可解析的 DECOMPOSE_START / DECOMPOSE_END JSON。不要解释、不要生成图片，请严格按照上一条要求重新输出完整的标记 JSON。", minuteTimeout(decompositionTimeout));
+      await fs.appendFile(analysisFile, `\n\n--- FORMAT_RETRY ---\n\n${repair.text}`, "utf8");
+      parsed = extractMarkedJson(repair.text, "DECOMPOSE_START", "DECOMPOSE_END");
+      analysis = repair;
+    }
+    layers = assignAssetIndices(parsed, maxAssets);
+  } else {
+    layers = assignAssetIndices(layers, maxAssets);
+  }
   await writeJsonAtomic(layersFile, layers);
-  const matting = config.matting || {};
-  await execFileAsync(process.execPath, [
-    path.join(pluginRoot, "scripts", "decompose-image.mjs"),
-    "--image", previewFile,
-    "--layers", layersFile,
-    "--out", path.join(directionDir, "layers"),
-    "--padding-ratio", String(matting.paddingRatio ?? 0.08),
-    "--min-foreground-ratio", String(matting.minForegroundRatio ?? 0.005),
-    "--max-foreground-ratio", String(matting.maxForegroundRatio ?? 0.98),
-    "--min-transparent-ratio", String(matting.minTransparentRatio ?? 0.02),
-    "--max-border-foreground-ratio", String(matting.maxBorderForegroundRatio ?? 0.65)
-  ], { timeout: minuteTimeout(decompositionTimeout) });
+  await fs.mkdir(outputDir, { recursive: true });
+  const existingFiles = await fs.readdir(outputDir, { withFileTypes: true });
+  await Promise.all(existingFiles
+    .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".png"))
+    .map((entry) => fs.rm(path.join(outputDir, entry.name), { force: true })));
+
+  const assetTimeout = minuteTimeout(assetConfig.timeoutMinutes ?? 10);
+  const maxCorrectionAttempts = Math.max(0, Number(assetConfig.maxCorrectionAttempts ?? 1) || 0);
+  const assetResults = new Map();
+  for (const layer of layers.layers.filter(isRasterAsset).sort((left, right) => left.assetIndex - right.assetIndex)) {
+    await startNewChat(page);
+    await attachFiles(page, [previewFile]);
+    let result;
+    for (let attempt = 0; attempt <= maxCorrectionAttempts; attempt += 1) {
+      const candidateFile = path.join(outputDir, `.candidate-${layer.assetIndex + 1}.png`);
+      const previousSources = await visibleImageSources(page);
+      const prompt = attempt === 0
+        ? separateAssetPrompt(layer)
+        : separateAssetCorrectionPrompt(layer, result.reason);
+      await sendPrompt(page, prompt);
+      await saveLastAssistantImage(page, candidateFile, assetTimeout, previousSources, [previewFile]);
+      result = await validateSeparateAsset({ candidateFile, layer, outputDir, thresholds: assetConfig });
+      if (result.status === "accepted") {
+        await fs.rm(candidateFile, { force: true });
+        break;
+      }
+      await fs.rename(candidateFile, path.join(outputDir, `rejected-${String(layer.assetIndex + 1).padStart(2, "0")}-attempt-${attempt + 1}.png`));
+    }
+    assetResults.set(layer.id, result);
+  }
+  const report = await writeDecompositionReport({
+    plan: layers,
+    sourceImage: previewFile,
+    outputDir,
+    assetResults
+  });
+  if (report.status !== "ready") {
+    throw new Error(`ChatGPT 独立透明素材未通过质量检查：${report.warnings.join("；") || "存在无效素材"}`);
+  }
   return layers;
 }
 
@@ -287,7 +429,7 @@ export async function generateDirections({ page, config, runDir, references, cou
     const existing = manifest.directions.find((item) => item.index === index && item.status === "ready");
     const existingLayers = await readJson(path.join(directionDir, "layers.json"));
     const existingReport = await readJson(path.join(directionDir, "layers", "decomposition-report.json"));
-    if (existing && existingLayers?.schemaVersion >= 2 && existingLayers.layers?.length && existingReport?.schemaVersion >= 2) continue;
+    if (existing && existingLayers?.schemaVersion >= 4 && existingLayers.layers?.length && await reportAssetsReady(existingReport)) continue;
     let cachedSpec = await readJson(specFile);
     const type = index <= 6 ? "popup" : index <= 8 ? "banner" : "float";
     const typeIndex = type === "popup" ? index - 1 : type === "banner" ? index - 7 : index - 9;
@@ -301,7 +443,7 @@ export async function generateDirections({ page, config, runDir, references, cou
         await attachFiles(page, pair.map((item) => item.file));
         let spec = cachedSpec;
         if (!spec) {
-          const analysis = await sendAndRead(page, analysisPrompt(index), minuteTimeout(config.generation.analysisTimeoutMinutes));
+          const analysis = await sendAndRead(page, analysisPrompt(index, type), minuteTimeout(config.generation.analysisTimeoutMinutes));
           spec = extractJson(analysis.text);
           cachedSpec = spec;
           await fs.writeFile(path.join(directionDir, "analysis.txt"), analysis.text, "utf8");
@@ -311,17 +453,18 @@ export async function generateDirections({ page, config, runDir, references, cou
         const previewFile = path.join(directionDir, "preview.png");
         if (!(await validImageFile(previewFile))) {
           const previewImageSources = await visibleImageSources(page);
-          await sendPrompt(page, previewPrompt(spec, size.width, size.height));
-          await saveLastAssistantImage(page, previewFile, minuteTimeout(config.generation.imageTimeoutMinutes), previewImageSources);
+          await sendPrompt(page, previewPrompt(spec, size.width, size.height, type));
+          await saveLastAssistantImage(page, previewFile, minuteTimeout(config.generation.imageTimeoutMinutes), previewImageSources, pair.map((item) => item.file));
         }
 
-        const layers = await decomposePreview(page, config, previewFile, directionDir, index, size.width, size.height);
+        const layers = await decomposePreview(page, config, previewFile, directionDir, index, size.width, size.height, type);
 
         const entry = {
-          index, status: "ready", type, ...size, previewFile,
+          index, status: "ready", type, contentScope: type === "popup" ? "popup-only" : "full-canvas", ...size, previewFile,
           specFile: path.join(directionDir, "spec.json"),
           layersFile: path.join(directionDir, "layers.json"),
           decompositionReport: path.join(directionDir, "layers", "decomposition-report.json"),
+          transparentAssetCount: layers.layers.filter(isRasterAsset).length,
           layerCount: Array.isArray(layers.layers) ? layers.layers.length : 0,
           sourceUrls: pair.map((item) => item.sourceUrl),
           keywords: spec.keywords || [],
