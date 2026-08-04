@@ -42,6 +42,7 @@ Use the deterministic local runtime for web collection, ChatGPT Web generation, 
 - Keep generated content brand-neutral and reject real logos, real brand names, copied copy, guaranteed approvals, fixed returns, or fabricated regulatory endorsements.
 - Resume from `run.json` and `figma-manifest.json`; never duplicate successful directions or Figma date sections.
 - Limit each image-generation attempt to five minutes by default. After three failed attempts, record the direction in `figma-manifest.json.failures` and continue generating later directions. Finish the local pass as `blocked`/partial when failures remain, never start Figma from a partial manifest, and retry only failed directions on the next run.
+- Give decomposition its own three-attempt budget, separate from reference analysis and preview generation. Once `preview.png` is valid, never regenerate it because decomposition timed out. On a missing decomposition response, reload the same saved direction chat, wait briefly for a delayed reply, then reupload the existing preview and resend only the decomposition prompt. After three decomposition failures, record `stage: "decomposition"`, continue later directions, and resume only decomposition on the next run.
 - Login expiry, CAPTCHA, WAF, security checks, access denial, and permission errors are user-action blockers, not direction failures. Stop immediately and notify the user instead of retrying or skipping past them.
 - For Figma writes, load and follow `figma-use` and `figma-generate-design`; work incrementally and return every created or mutated node ID.
 - Preserve the two-up contract in Figma: `Preview` is the visible flattened design on the left, while `Editable` on the right must visibly render the reconstruction from accepted separate `chatgpt-transparent-asset` PNGs plus native text and vectors. Keep `Visual Base` locked but hidden as an inspection reference; never show the same flattened preview on both sides. Popup `Editable` canvases stay transparent and contain only the popup body; do not rebuild page or App-interface backgrounds, and ignore legacy popup layers such as `Background/AppInterface`, search bars, navigation, bottom tabs, feeds, and page cards. Banner and float directions may use the first `spec.json` palette color or their native background geometry. Place transparent assets inside `assetPlacement.box` with aspect ratio preserved, `contain` sizing, and center alignment; use `assetBboxPx` only for older reports. Never upload rejected assets.
@@ -50,7 +51,7 @@ Use the deterministic local runtime for web collection, ChatGPT Web generation, 
 ## Recovery
 
 - If the runtime reports missing login, run setup and then rerun the same command.
-- If a direction fails three times, retain its screenshots, continue later directions, and retry only that incomplete direction on the next run.
+- If preview generation fails three times, retain its screenshots and continue later directions. If decomposition fails three times, retain its stage-specific screenshots, preserve the successful preview, continue later directions, and retry only decomposition on the next run.
 - If Figma fails, do not rerun collection or generation. Resume from the existing manifest.
 - If the 10:30 run was missed, notify once and wait for explicit user approval before launching a catch-up run.
 

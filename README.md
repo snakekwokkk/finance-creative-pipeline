@@ -132,6 +132,8 @@ codex plugin add finance-creative-pipeline@<marketplace-name>
 | `generation.directionCount` | 原创方向数量 |
 | `generation.maxRetries` | 单方向最大重试次数 |
 | `generation.imageTimeoutMinutes` | 单次生图等待上限，默认 5 分钟 |
+| `generation.decompositionTimeoutMinutes` | 单次拆图分析等待上限，默认 6 分钟 |
+| `generation.decompositionMaxAttempts` | 拆图独立尝试次数，默认 3；不占用生图重试次数 |
 | `chatgpt.dailyProjects` | 是否每天创建或复用一个 ChatGPT 日期项目，默认开启 |
 | `chatgpt.projectNamePrefix` | 日期项目前缀，默认 `金融运营素材` |
 | `transparentAssets.maxAssets` | 单方向最多拆出的复杂视觉素材数，默认 4 |
@@ -163,7 +165,7 @@ codex plugin add finance-creative-pipeline@<marketplace-name>
 
 恢复任务时先读取已有 `run.json` 和 `figma-manifest.json`。如果本地阶段已经完成，只继续 Figma 同步，不要重新运行采集和生成。
 
-单个方向连续三次失败后会写入 `figma-manifest.json.failures`，流水线继续生成后续方向。本轮结束仍有失败项时状态保持 `blocked`，不会同步不完整的 Figma 交付；再次运行只重试失败方向。登录失效、验证码、安全验证和权限问题仍会立即停止并通知用户。
+参考分析与生图共用方向重试预算；预览生成成功后不会再次生成。拆图拥有独立的三次尝试：超时后刷新并重新进入同一方向聊天，先检查延迟回复，仍无回复才重新上传已有 `preview.png` 并重发拆图指令。三次仍失败时以 `stage: decomposition` 写入 `figma-manifest.json.failures` 并继续下一方向；再次运行只恢复拆图，不重复采集、参考分析或生图。登录失效、验证码、安全验证和权限问题仍会立即停止并通知用户。
 
 ### 输出结构
 
@@ -354,6 +356,8 @@ User configuration lives outside the repository and should never be committed:
 | `generation.directionCount` | Number of original directions |
 | `generation.maxRetries` | Maximum retries per direction |
 | `generation.imageTimeoutMinutes` | Maximum wait per image-generation attempt; defaults to 5 minutes |
+| `generation.decompositionTimeoutMinutes` | Maximum wait per decomposition analysis attempt; defaults to 6 minutes |
+| `generation.decompositionMaxAttempts` | Independent decomposition attempts; defaults to 3 and does not consume generation retries |
 | `chatgpt.dailyProjects` | Create or reuse one dated ChatGPT project per day; enabled by default |
 | `chatgpt.projectNamePrefix` | Prefix for dated project names; defaults to `金融运营素材` |
 | `transparentAssets.maxAssets` | Maximum non-reconstructable complex assets per direction; defaults to 4 |
@@ -387,7 +391,7 @@ Primary states:
 
 Always inspect the existing `run.json` and `figma-manifest.json` before resuming. If local generation is already complete, continue only the Figma stage.
 
-After three failed attempts, the direction is recorded in `figma-manifest.json.failures` and later directions continue. A run with remaining failures stays `blocked` and cannot enter Figma sync; the next run retries only incomplete directions. Login expiry, CAPTCHA, security checks, and permission issues still stop immediately and notify the user.
+Reference analysis and preview generation share the direction retry budget, but a successfully saved preview is never regenerated. Decomposition has three independent attempts. After a timeout, the runtime reloads the same direction chat, checks for a delayed reply, and only then reuploads the existing `preview.png` and resends the decomposition prompt. Three failures are recorded with `stage: decomposition`, later directions continue, and the next run resumes decomposition without recollecting references or regenerating the preview. Login expiry, CAPTCHA, security checks, and permission issues still stop immediately and notify the user.
 
 ### Output Layout
 

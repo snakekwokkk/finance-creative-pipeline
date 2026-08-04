@@ -44,6 +44,7 @@
     "brandNeutral": true,
     "analysisTimeoutMinutes": 6,
     "decompositionTimeoutMinutes": 6,
+    "decompositionMaxAttempts": 3,
     "imageTimeoutMinutes": 5
   },
   "transparentAssets": {

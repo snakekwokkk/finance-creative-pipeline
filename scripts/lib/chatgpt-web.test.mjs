@@ -10,13 +10,17 @@ import {
   clearDirectionFailure,
   conversationUrl,
   dailyProjectName,
+  decompositionAttemptLimit,
+  decompositionAttemptsExhausted,
   decompositionPrompt,
   directionChatTitle,
   previewPrompt,
   projectBaseUrl,
   recordDirectionFailure,
   referenceAnalysisReceiptValid,
+  referenceUploadRequired,
   requiresUserAction,
+  runDecompositionAttempts,
   separateAssetCorrectionPrompt,
   separateAssetPrompt,
   selectReferencePair
@@ -73,6 +77,9 @@ test("missing-reference replies force a verified re-upload and old specs need a 
     analysisAcceptedAt: "2026-08-04T08:00:00.000Z"
   }, files), true);
   assert.equal(referenceAnalysisReceiptValid({ files: ["01-popup.webp", "02-popup.webp"] }, files), false);
+  assert.equal(referenceUploadRequired(null, false), true);
+  assert.equal(referenceUploadRequired({ composition: "cached" }, false), false);
+  assert.equal(referenceUploadRequired(null, true), false);
 });
 
 test("daily ChatGPT projects and direction chat URLs are deterministic", () => {
@@ -137,6 +144,37 @@ test("reference pairs stay inside the requested creative type", () => {
 test("human authentication blockers stop immediately", () => {
   assert.equal(requiresUserAction(new Error("ChatGPT 专用浏览器尚未登录")), true);
   assert.equal(requiresUserAction(new Error("等待 ChatGPT 生成图片超时")), false);
+});
+
+test("decomposition has three independent attempts and recovers the same chat before retrying", async () => {
+  assert.equal(decompositionAttemptLimit({}), 3);
+  assert.equal(decompositionAttemptLimit({ generation: { decompositionMaxAttempts: 2 } }), 2);
+  let operations = 0;
+  let recoveries = 0;
+  const result = await runDecompositionAttempts({
+    attempts: 3,
+    recover: async () => { recoveries += 1; },
+    operation: async () => {
+      operations += 1;
+      if (operations < 3) throw new Error("GPT 无响应");
+      return "ready";
+    }
+  });
+  assert.equal(result, "ready");
+  assert.equal(operations, 3);
+  assert.equal(recoveries, 2);
+});
+
+test("exhausted decomposition attempts are stage-specific and do not consume generation retries", async () => {
+  await assert.rejects(
+    runDecompositionAttempts({ attempts: 3, operation: async () => { throw new Error("timeout"); } }),
+    (error) => error.code === "DECOMPOSITION_ATTEMPTS_EXHAUSTED"
+      && error.stage === "decomposition"
+      && error.attempts === 3
+  );
+  const error = decompositionAttemptsExhausted(new Error("timeout"), 3);
+  assert.equal(error.stage, "decomposition");
+  assert.equal(error.attempts, 3);
 });
 
 test("failed directions remain resumable without hiding completed directions", () => {
