@@ -53,6 +53,16 @@ test("reference uploads are accepted only after every image attachment is visibl
   }).ready, false);
 });
 
+test("reference upload readiness does not depend on the file input retaining its FileList", () => {
+  const files = ["/tmp/01-popup.webp", "/tmp/02-popup.webp"];
+  assert.equal(attachmentDeliveryStatus({
+    files,
+    removalLabels: ["移除文件1：01-popup.webp", "移除文件2：02-popup.webp"],
+    imageCount: 2,
+    sendEnabled: true
+  }).ready, true);
+});
+
 test("missing-reference replies force a verified re-upload and old specs need a receipt", () => {
   assert.equal(assistantReportsMissingReferenceImages("我目前看不到所说的两张参考图，请重新上传。"), true);
   assert.equal(assistantReportsMissingReferenceImages("I cannot see the uploaded reference images."), true);

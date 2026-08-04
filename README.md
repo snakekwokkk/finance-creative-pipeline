@@ -86,6 +86,8 @@ npm run setup
 
 登录设置、测试、正式、定时和断点恢复运行均使用带持久化配置的可见专用 Chrome。花瓣会对无头浏览器返回 `405`，而 macOS 后台启动方式不能稳定复用 ChatGPT 登录会话，因此默认不再隐藏或最小化窗口。遇到验证码、安全验证或权限确认时会停止并通知用户，流水线不会绕过安全限制。
 
+每次工作流最多启动一次专用 Chrome，并在启动阶段一次性准备花瓣、Pin 详情和 ChatGPT 标签页。所有方向和重试均复用该浏览器会话；单实例锁会阻止重复调度再次打开窗口，浏览器异常时任务直接停止而不会自动重启。
+
 先运行小规模测试：
 
 ```bash
@@ -305,6 +307,8 @@ npm run setup
 ```
 
 Login setup, tests, normal runs, scheduled runs, and resumed runs all use a visible dedicated Chrome with the persistent profile. Huaban returns HTTP 405 to headless Chrome, while the macOS background-launch mode does not reliably preserve the ChatGPT authenticated session, so the window is no longer hidden or minimized by default. CAPTCHA, security checks, and permission prompts stop the run and require user action; they are never bypassed.
+
+Each workflow starts the dedicated Chrome at most once and prepares the Huaban, Pin-detail, and ChatGPT tabs together during startup. Every direction and retry reuses that browser session. A global single-run lock prevents duplicate schedules from opening another window, and a browser failure stops the run instead of relaunching Chrome.
 
 Run the small test first:
 

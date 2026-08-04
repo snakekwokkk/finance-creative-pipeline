@@ -359,7 +359,10 @@ async function attachmentSnapshot(page, files) {
   const removalLabels = await form.locator(attachmentRemovalSelector).evaluateAll((buttons) => buttons
     .map((button) => button.getAttribute("aria-label") || "")
     .filter(Boolean));
-  const imageCount = await form.locator('img[src^="blob:"]').count();
+  const imageCount = await form.locator("img").evaluateAll((images) => images.filter((image) => {
+    const rect = image.getBoundingClientRect();
+    return image.complete && image.naturalWidth > 0 && image.naturalHeight > 0 && rect.width >= 16 && rect.height >= 16;
+  }).length);
   const sendButtons = form.locator('[data-testid="send-button"], button[aria-label*="发送"], button[aria-label*="Send"]');
   let sendEnabled = false;
   for (let index = 0; index < await sendButtons.count(); index += 1) {
@@ -376,24 +379,28 @@ async function attachmentSnapshot(page, files) {
 
 async function attachFiles(page, files) {
   await clearComposerAttachments(page);
-  const candidates = [
-    page.locator('input[data-testid="upload-photos-input"]'),
-    page.locator("#upload-photos"),
-    page.locator('input[type="file"][accept*="image"]:not([capture])')
-  ];
   let input = null;
-  for (const candidate of candidates) {
-    if (await candidate.count()) {
-      input = candidate.first();
-      break;
+  const inputStarted = Date.now();
+  while (Date.now() - inputStarted < 30_000 && !input) {
+    const candidates = [
+      page.locator('input[data-testid="upload-photos-input"]'),
+      page.locator("#upload-photos"),
+      page.locator('input[type="file"][accept*="image"]:not([capture])')
+    ];
+    for (const candidate of candidates) {
+      if (!(await candidate.count())) continue;
+      const current = candidate.first();
+      const handle = await current.elementHandle();
+      await page.waitForTimeout(750);
+      if (handle && await handle.evaluate((element) => element.isConnected).catch(() => false)) {
+        input = current;
+        break;
+      }
     }
+    if (!input) await page.waitForTimeout(250);
   }
   if (!input) throw new Error("未找到 ChatGPT 图片专用上传控件，已停止以避免无参考图生成");
   await input.setInputFiles(files);
-  const selectedCount = await input.evaluate((element) => element.files?.length || 0);
-  if (selectedCount !== files.length) {
-    throw new Error(`ChatGPT 图片选择数量不正确：需要 ${files.length} 张，实际 ${selectedCount} 张`);
-  }
 
   const started = Date.now();
   let latest;

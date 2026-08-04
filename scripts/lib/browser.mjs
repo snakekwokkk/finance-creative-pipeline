@@ -25,6 +25,19 @@ export function shouldRunHeadless(config, { forceVisible = false } = {}) {
   return browserLaunchMode(config, { forceVisible }) === "headless";
 }
 
+export function createSingleLaunchBrowser(launch = launchPersistentBrowser) {
+  let launchAttempted = false;
+  return async (...args) => {
+    if (launchAttempted) {
+      const error = new Error("当前工作流已经启动过 Chrome，禁止再次打开浏览器窗口");
+      error.code = "BROWSER_ALREADY_LAUNCHED";
+      throw error;
+    }
+    launchAttempted = true;
+    return launch(...args);
+  };
+}
+
 export function chromeAppPath(executablePath) {
   const marker = String(executablePath || "").indexOf(".app/");
   return marker >= 0 ? executablePath.slice(0, marker + 4) : null;
@@ -146,7 +159,8 @@ export async function launchPersistentBrowser(config, options = {}) {
 
 export async function findOrOpenPage(context, urlPrefix, targetUrl) {
   const existing = context.pages().find((page) => page.url().startsWith(urlPrefix));
-  const page = existing || (await context.newPage());
+  const reusable = context.pages().find((page) => ["about:blank", "chrome://newtab/"].includes(page.url()));
+  const page = existing || reusable || (await context.newPage());
   if (!page.url().startsWith(urlPrefix)) await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
   return page;
 }

@@ -314,7 +314,7 @@ async function qualifiedExistingReferences(existing, minWidth, maxFloatHeightToW
   return qualified;
 }
 
-export async function collectReferences({ context, page, config, runDir, date, count }) {
+export async function collectReferences({ context, page, detailPage: suppliedDetailPage = null, config, runDir, date, count }) {
   const referencesDir = path.join(runDir, "references");
   await fs.mkdir(referencesDir, { recursive: true });
   const existing = await readJson(path.join(runDir, "references.json"), []);
@@ -328,7 +328,7 @@ export async function collectReferences({ context, page, config, runDir, date, c
   if (results.length >= count) return results.slice(0, count);
 
   const history = await loadReferenceHistory(config.outputRoot);
-  const detailPage = await context.newPage();
+  const detailPage = suppliedDetailPage || await context.newPage();
   const attemptedPinIds = new Set();
 
   try {

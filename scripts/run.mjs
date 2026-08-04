@@ -1,11 +1,12 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { appSupportDir, ensureConfig, localDate, localTime } from "./lib/config.mjs";
-import { launchPersistentBrowser, findOrOpenPage, screenshotFailure } from "./lib/browser.mjs";
+import { createSingleLaunchBrowser, launchPersistentBrowser, findOrOpenPage, screenshotFailure } from "./lib/browser.mjs";
 import { buildSearchPlansForTypes, collectReferences } from "./lib/collector.mjs";
 import { activeDirectionFailures, generateDirections } from "./lib/chatgpt-web.mjs";
 import { appendError, ensureRun, readJson, updateRun, writeJsonAtomic } from "./lib/state.mjs";
 import { notify } from "./lib/notify.mjs";
+import { acquireWorkflowLock } from "./lib/workflow-lock.mjs";
 
 const testMode = process.argv.includes("--test");
 const scheduledMode = process.argv.includes("--scheduled");
@@ -53,14 +54,36 @@ const runConfig = validationMode
       generation: { ...config.generation, directionCount }
     }
   : config;
+let workflowLock;
+try {
+  workflowLock = await acquireWorkflowLock(path.join(appSupportDir, "workflow.lock"), {
+    runName,
+    runDir,
+    mode: validationMode ? "validation" : testMode ? "test" : scheduledMode ? "scheduled" : "normal"
+  });
+} catch (error) {
+  await notify("金融运营素材流水线未启动", error.message);
+  console.error(error.stack || error.message);
+  process.exit(1);
+}
+
+const launchBrowserOnce = createSingleLaunchBrowser(launchPersistentBrowser);
 let context;
 try {
-  context = await launchPersistentBrowser(runConfig, { forceVisible: visibleMode });
+  context = await launchBrowserOnce(runConfig, { forceVisible: visibleMode });
   const huaban = await findOrOpenPage(context, "https://huaban.com", "https://huaban.com/discovery");
   const chatgpt = await findOrOpenPage(context, "https://chatgpt.com", "https://chatgpt.com/");
+  const huabanDetail = await context.newPage();
+  const browserSession = {
+    pid: process.pid,
+    launchCount: 1,
+    windowCount: 1,
+    startedAt: new Date().toISOString()
+  };
+  console.log(JSON.stringify({ event: "browser_session_started", ...browserSession }));
 
-  await updateRun(runFile, { status: "running", stages: { collection: "running", generation: "pending", decomposition: "pending", figma: "pending" } });
-  const references = await collectReferences({ context, page: huaban, config: runConfig, runDir, date, count: referenceCount });
+  await updateRun(runFile, { status: "running", browserSession, stages: { collection: "running", generation: "pending", decomposition: "pending", figma: "pending" } });
+  const references = await collectReferences({ context, page: huaban, detailPage: huabanDetail, config: runConfig, runDir, date, count: referenceCount });
   await updateRun(runFile, { status: "running", referenceCount: references.length, stages: { collection: "complete", generation: "running", decomposition: "pending", figma: "pending" } });
   const manifest = await generateDirections({
     page: chatgpt,
@@ -107,4 +130,5 @@ try {
   process.exitCode = 1;
 } finally {
   await context?.close().catch(() => {});
+  await workflowLock.release().catch(() => {});
 }
