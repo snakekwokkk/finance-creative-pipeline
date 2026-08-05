@@ -10,7 +10,7 @@ const HISTORY_FILE = "reference-history.json";
 const DEFAULT_SEARCH_PLANS = [
   {
     type: "popup",
-    count: 12,
+    count: 6,
     keywords: [
       "互联网金融 弹窗", "借贷 活动弹窗", "助贷 营销弹窗", "贷款 优惠券弹窗",
       "金融 福利弹窗", "借款 结果弹窗", "金融 App 弹窗", "贷款 运营弹窗"
@@ -18,7 +18,7 @@ const DEFAULT_SEARCH_PLANS = [
   },
   {
     type: "banner",
-    count: 4,
+    count: 2,
     keywords: [
       "金融banner", "理财banner", "投资理财banner", "金融产品banner",
       "基金理财banner", "证券banner", "简约金融banner"
@@ -26,7 +26,7 @@ const DEFAULT_SEARCH_PLANS = [
   },
   {
     type: "float",
-    count: 4,
+    count: 2,
     keywords: [
       "浮窗", "小浮窗", "悬浮窗素材", "活动浮窗",
       "红包浮窗", "福利浮窗", "悬浮按钮", "活动浮标"
@@ -90,7 +90,7 @@ export function buildSearchPlans(collection, count, date) {
   return plans;
 }
 
-export function buildSearchPlansForTypes(collection, types, countPerType = 2) {
+export function buildSearchPlansForTypes(collection, types, countPerType = 1) {
   const configured = Array.isArray(collection.searchPlans) && collection.searchPlans.length
     ? collection.searchPlans
     : DEFAULT_SEARCH_PLANS;
@@ -99,6 +99,16 @@ export function buildSearchPlansForTypes(collection, types, countPerType = 2) {
     if (!plan?.keywords?.length) throw new Error(`配置中缺少 ${type} 类型的搜索词`);
     return { ...plan, count: countPerType };
   });
+}
+
+export function selectReferencesForPlans(references, plans) {
+  const selected = [];
+  for (const plan of plans) {
+    const typed = references.filter((item) => inferReferenceType(item) === plan.type).slice(0, plan.count);
+    if (typed.length < plan.count) return null;
+    selected.push(...typed);
+  }
+  return selected;
 }
 
 function historyRecord(item, date) {
@@ -325,7 +335,8 @@ export async function collectReferences({ context, page, detailPage: suppliedDet
   const plans = buildSearchPlans(config.collection, count, date);
   const results = await qualifiedExistingReferences(existing, minWidth, maxFloatHeightToWidthRatio);
   if (results.length !== existing.length) await writeJsonAtomic(path.join(runDir, "references.json"), results);
-  if (results.length >= count) return results.slice(0, count);
+  const existingSelection = selectReferencesForPlans(results, plans);
+  if (existingSelection) return existingSelection;
 
   const history = await loadReferenceHistory(config.outputRoot);
   const detailPage = suppliedDetailPage || await context.newPage();
@@ -399,9 +410,10 @@ export async function collectReferences({ context, page, detailPage: suppliedDet
     await detailPage.close().catch(() => {});
   }
 
-  if (results.length < count) {
+  const selected = selectReferencesForPlans(results, plans);
+  if (!selected) {
     await screenshotFailure(page, path.join(runDir, "huaban-incomplete.png"));
-    throw new Error(`仅采集到 ${results.length}/${count} 张不重复参考图`);
+    throw new Error(`未按类型配额采集满 ${count} 张不重复参考图`);
   }
 
   const csvRows = results.map((item, index) => [
@@ -410,5 +422,5 @@ export async function collectReferences({ context, page, detailPage: suppliedDet
     item.searchKeyword, item.collectedAt, item.sha256, item.ahash
   ].map(csvCell).join(","));
   await fs.writeFile(path.join(runDir, "sources.csv"), CSV_HEADER + `${csvRows.join("\n")}\n`, "utf8");
-  return results;
+  return selected;
 }

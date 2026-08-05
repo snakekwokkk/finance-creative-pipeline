@@ -7,6 +7,7 @@ import sharp from "sharp";
 import {
   TRANSPARENT_ASSET_ENGINE,
   assignAssetIndices,
+  recoverAcceptedAsset,
   reportAssetsReady,
   validateSeparateAsset,
   writeDecompositionReport
@@ -48,6 +49,9 @@ test("a true transparent image is trimmed and accepted as one independent file",
   const result = await validateSeparateAsset({ candidateFile, layer, outputDir });
   assert.equal(result.status, "accepted");
   assert.ok(result.intrinsicPx.width < 500 && result.intrinsicPx.height < 500);
+  const recovered = await recoverAcceptedAsset({ layer, outputDir });
+  assert.equal(recovered.status, "accepted");
+  assert.equal(recovered.file, result.file);
   const report = await writeDecompositionReport({ plan: assigned, sourceImage, outputDir, assetResults: new Map([["hero", result]]) });
   assert.equal(report.status, "ready");
   assert.equal(report.layers.find((item) => item.id === "hero").assetPlacement.fit, "contain");

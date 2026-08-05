@@ -3,7 +3,7 @@ import path from "node:path";
 import { appSupportDir, ensureConfig, localDate, localTime } from "./lib/config.mjs";
 import { createSingleLaunchBrowser, launchPersistentBrowser, findOrOpenPage, screenshotFailure } from "./lib/browser.mjs";
 import { buildSearchPlansForTypes, collectReferences } from "./lib/collector.mjs";
-import { activeDirectionFailures, generateDirections } from "./lib/chatgpt-web.mjs";
+import { activeDirectionFailures, generateDirections, readyDirectionsForFigma, workflowAbortedError, workflowAbortRequested } from "./lib/chatgpt-web.mjs";
 import { appendError, ensureRun, readJson, updateRun, writeJsonAtomic } from "./lib/state.mjs";
 import { notify } from "./lib/notify.mjs";
 import { acquireWorkflowLock } from "./lib/workflow-lock.mjs";
@@ -42,7 +42,7 @@ if (scheduledMode && localTime(config.timezone) > "10:45" && !existingRun) {
 }
 await ensureRun(runFile, date, testMode || validationMode);
 
-const referenceCount = validationMode ? requestedTypes.length * 2 : testMode ? 3 : config.collection.referenceCount;
+const referenceCount = validationMode ? requestedTypes.length : testMode ? 1 : config.collection.referenceCount;
 const directionCount = validationMode ? requestedTypes.length : testMode ? 1 : config.generation.directionCount;
 const runConfig = validationMode
   ? {
@@ -69,8 +69,22 @@ try {
 
 const launchBrowserOnce = createSingleLaunchBrowser(launchPersistentBrowser);
 let context;
+let stopSignal = null;
+const requestStop = (signal) => {
+  if (stopSignal) return;
+  stopSignal = signal;
+  context?.close().catch(() => {});
+};
+const onSigint = () => requestStop("SIGINT");
+const onSigterm = () => requestStop("SIGTERM");
+process.once("SIGINT", onSigint);
+process.once("SIGTERM", onSigterm);
 try {
   context = await launchBrowserOnce(runConfig, { forceVisible: visibleMode });
+  if (stopSignal) {
+    await context.close().catch(() => {});
+    throw workflowAbortedError();
+  }
   const huaban = await findOrOpenPage(context, "https://huaban.com", "https://huaban.com/discovery");
   const chatgpt = await findOrOpenPage(context, "https://chatgpt.com", "https://chatgpt.com/");
   const huabanDetail = await context.newPage();
@@ -93,24 +107,25 @@ try {
     count: directionCount,
     directionTypes: validationMode ? requestedTypes : null,
     runDate: date,
-    onProjectReady: (chatgptProject) => updateRun(runFile, { chatgptProject })
+    onProjectReady: (chatgptProject) => updateRun(runFile, { chatgptProject }),
+    shouldStop: () => Boolean(stopSignal)
   });
-  const readyCount = manifest.directions.filter((item) => item.status === "ready").length;
+  const readyDirections = await readyDirectionsForFigma(manifest);
+  const readyCount = readyDirections.length;
   const failures = activeDirectionFailures(manifest);
   const manifestFile = path.join(runDir, "figma-manifest.json");
-  if (failures.length) {
+  if (failures.length && readyCount > 0) {
     await updateRun(runFile, {
-      status: "blocked",
+      status: "awaiting_figma",
       directionCount: readyCount,
       directionFailures: failures,
       chatgptProject: manifest.chatgptProject,
       figmaManifest: manifestFile,
       stages: { collection: "complete", generation: "partial", decomposition: "partial", figma: "pending" }
     });
-    await notify("金融运营素材流水线部分完成", `${readyCount}/${directionCount} 套已完成，${failures.length} 套失败；再次运行将只重试失败方向。`);
-    console.log(JSON.stringify({ status: "partial", runDir, manifest: manifestFile, readyCount, failures }));
-    process.exitCode = 1;
-  } else {
+    await notify("金融运营素材流水线等待写入 Figma", `${readyCount}/${directionCount} 套可用，${failures.length} 套失败已保留；继续同步可用方向。`);
+    console.log(JSON.stringify({ status: "awaiting_figma", partial: true, runDir, manifest: manifestFile, readyCount, failures }));
+  } else if (!failures.length) {
     await updateRun(runFile, {
       status: "awaiting_figma",
       directionCount: readyCount,
@@ -121,14 +136,41 @@ try {
     });
     await notify("金融运营素材流水线", `${validationMode ? "验证素材" : "本地素材和生图"}已完成，等待写入 Figma：${runDir}`);
     console.log(JSON.stringify({ status: "awaiting_figma", runDir, manifest: manifestFile }));
+  } else {
+    await updateRun(runFile, {
+      status: "blocked",
+      directionCount: 0,
+      directionFailures: failures,
+      chatgptProject: manifest.chatgptProject,
+      figmaManifest: manifestFile,
+      stages: { collection: "complete", generation: "partial", decomposition: "partial", figma: "pending" }
+    });
+    await notify("金融运营素材流水线无可同步方向", `${failures.length} 套均失败，ChatGPT 阶段已结束，本次不写入 Figma。`);
+    console.log(JSON.stringify({ status: "partial", runDir, manifest: manifestFile, readyCount: 0, failures }));
   }
 } catch (error) {
-  if (context?.pages()?.length) await screenshotFailure(context.pages()[0], path.join(runDir, "fatal-error.png"));
-  await appendError(runFile, "local_pipeline", error);
-  await notify("金融运营素材流水线需要处理", error.message);
-  console.error(error.stack || error.message);
-  process.exitCode = 1;
+  if (workflowAbortRequested(error, () => Boolean(stopSignal))) {
+    const manifest = await readJson(path.join(runDir, "figma-manifest.json"), { directions: [], failures: [] });
+    const readyCount = (manifest.directions || []).filter((item) => item.status === "ready").length;
+    const failures = activeDirectionFailures(manifest);
+    await updateRun(runFile, {
+      status: "blocked",
+      directionCount: readyCount,
+      directionFailures: failures,
+      stages: { collection: "complete", generation: "partial", decomposition: "partial", figma: "pending" }
+    });
+    console.log(JSON.stringify({ status: "stopped", signal: stopSignal, runDir, readyCount, failures }));
+    process.exitCode = stopSignal === "SIGTERM" ? 143 : 130;
+  } else {
+    if (context?.pages()?.length) await screenshotFailure(context.pages()[0], path.join(runDir, "fatal-error.png"));
+    await appendError(runFile, "local_pipeline", error);
+    await notify("金融运营素材流水线需要处理", error.message);
+    console.error(error.stack || error.message);
+    process.exitCode = 1;
+  }
 } finally {
+  process.off("SIGINT", onSigint);
+  process.off("SIGTERM", onSigterm);
   await context?.close().catch(() => {});
   await workflowLock.release().catch(() => {});
 }

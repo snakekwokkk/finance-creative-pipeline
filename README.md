@@ -27,7 +27,7 @@ Finance Creative Pipeline 是一个面向中国互联网金融运营素材的 Co
 5. 只把无法用 Figma 基础图形可靠重构的复杂主视觉逐个交给 ChatGPT，每个元素单独生成一张透明 PNG。
 6. 将预览图、通过检查的透明独立素材和原生文字/几何图层同步到 Figma。
 
-默认正式运行会采集 20 张参考图并生成 10 个原创方向：6 个弹窗、2 个 Banner、2 个浮窗。
+默认正式运行会采集 10 张参考图并生成 10 个原创方向：6 个弹窗、2 个 Banner、2 个浮窗，每个方向使用 1 张同类型参考图。
 
 ### 核心原则
 
@@ -41,7 +41,7 @@ Finance Creative Pipeline 是一个面向中国互联网金融运营素材的 Co
 - 没有真实 Alpha、带底色、内容为空或触碰图片边界的素材会被拒绝，也不会上传到 Figma。
 - 每个运行日期只使用一个名为 `金融运营素材 YYYY-MM-DD` 的 ChatGPT 项目，每个设计方向只使用一个聊天。项目 URL 和方向聊天 URL 都会写入清单，失败重试或断点恢复时继续原聊天，不会为拆图或单个素材另外新建聊天。
 - 项目内聊天会显式命名为 `弹窗1` 至 `弹窗6`、`Banner1` 至 `Banner2`、`浮窗1` 至 `浮窗2`；编号在各素材类型内独立计算，验证运行中的每个类型从 1 开始。
-- 参考图使用 ChatGPT 图片专用上传控件；只有两张附件的文件名、缩略图和发送状态全部验证通过后才发送分析提示词。若 ChatGPT 回复未收到图片，流水线会清理草稿并重新上传，不会继续无图生图。
+- 参考图使用 ChatGPT 图片专用上传控件；只有该方向 1 张附件的文件名、缩略图和发送状态全部验证通过后才发送分析提示词。若 ChatGPT 回复未收到图片，流水线会清理草稿并重新上传，不会继续无图生图。
 - 流水线从 `run.json` 和 `figma-manifest.json` 恢复，避免重复采集、重复生成和重复创建 Figma 日期分区。
 - 参考图按类型采集：弹窗、Banner、浮窗分别使用匹配的关键词池和数量配额，不混用搜索词。Banner 词库使用 `金融banner`、`理财banner`、`投资理财banner` 等金融垂类词，优先寻找结构简洁的横向设计；浮窗词库使用 `浮窗`、`小浮窗`、`悬浮窗素材` 等形态词，并排除明显的完整手机页面。
 - `reference-history.json` 长期记录已采集 Pin 和图片指纹；后续运行会跳过历史 Pin 和相同图片并继续滚动检索，不会误删仅仅版式相似的素材。
@@ -130,15 +130,17 @@ codex plugin add finance-creative-pipeline@<marketplace-name>
 | `collection.maxFloatHeightToWidthRatio` | 浮窗参考图允许的最大高宽比，默认 2；用于排除完整手机页面 |
 | `collection.searchPlans` | 弹窗、Banner、浮窗各自的配额和搜索词列表 |
 | `generation.directionCount` | 原创方向数量 |
-| `generation.maxRetries` | 单方向最大重试次数 |
+| `generation.analysisTimeoutMinutes` | 第 6 步参考分析单次等待上限，默认 5 分钟 |
+| `generation.analysisMaxAttempts` | 第 6 步参考分析首轮总尝试次数，默认 2；失败方向在队尾再尝试 1 次 |
+| `generation.maxAttempts` | 第 7 步预览生成总尝试次数，默认 2 |
 | `generation.imageTimeoutMinutes` | 单次生图等待上限，默认 5 分钟 |
-| `generation.decompositionTimeoutMinutes` | 单次拆图分析等待上限，默认 6 分钟 |
-| `generation.decompositionMaxAttempts` | 拆图独立尝试次数，默认 3；不占用生图重试次数 |
+| `generation.decompositionTimeoutMinutes` | 第 8 步语义分层单次等待上限，默认 5 分钟 |
+| `generation.decompositionMaxAttempts` | 第 8 步语义分层总尝试次数，默认 2 |
 | `chatgpt.dailyProjects` | 是否每天创建或复用一个 ChatGPT 日期项目，默认开启 |
 | `chatgpt.projectNamePrefix` | 日期项目前缀，默认 `金融运营素材` |
 | `transparentAssets.maxAssets` | 单方向最多拆出的复杂视觉素材数，默认 4 |
-| `transparentAssets.timeoutMinutes` | 每个独立素材等待 ChatGPT 的上限，默认 10 分钟 |
-| `transparentAssets.maxCorrectionAttempts` | 单素材透明度检查失败后的纠错重生次数，默认 1 |
+| `transparentAssets.timeoutMinutes` | 第 9 步每个独立素材单次等待上限，默认 5 分钟 |
+| `transparentAssets.maxAttempts` | 第 9 步每个独立素材总尝试次数，默认 2 |
 | `transparentAssets.minForegroundRatio` | 单素材最小前景占比 |
 | `transparentAssets.maxForegroundRatio` | 单素材最大前景占比 |
 | `transparentAssets.minTransparentRatio` | 单素材最小透明像素占比 |
@@ -159,13 +161,13 @@ codex plugin add finance-creative-pipeline@<marketplace-name>
 | 状态 | 含义 |
 | --- | --- |
 | `running` | 本地采集、生成或分解正在进行 |
-| `awaiting_figma` | 本地产物完整，可以开始 Figma 同步 |
+| `awaiting_figma` | ChatGPT 阶段结束，至少一个完整方向可以开始 Figma 同步；失败方向保留审计记录 |
 | `complete` | Figma 同步和视觉核验完成 |
 | `blocked` | 需要用户处理登录、验证码、权限或其他外部阻塞 |
 
 恢复任务时先读取已有 `run.json` 和 `figma-manifest.json`。如果本地阶段已经完成，只继续 Figma 同步，不要重新运行采集和生成。
 
-参考分析与生图共用方向重试预算；预览生成成功后不会再次生成。拆图拥有独立的三次尝试：超时后刷新并重新进入同一方向聊天，先检查延迟回复，仍无回复才重新上传已有 `preview.png` 并重发拆图指令。三次仍失败时以 `stage: decomposition` 写入 `figma-manifest.json.failures` 并继续下一方向；再次运行只恢复拆图，不重复采集、参考分析或生图。登录失效、验证码、安全验证和权限问题仍会立即停止并通知用户。
+第 6 步参考分析、第 7 步预览生成、第 8 步语义分层和第 9 步逐素材透明 PNG 提取分别拥有独立的两次尝试，每次等待最多 5 分钟。第 6 步两次失败后先跳过该方向，并在所有方向结束后再尝试 1 次；第 9 步不会嵌套进第 8 步重试而放大次数。运行开始时已有的历史失败方向会排到新方向之后，且只获得一次最终尝试。最终仍失败的方向保留在 `figma-manifest.json.failures`，当天 ChatGPT 阶段随即结束；只要存在具备有效 `preview.png`、`layers.json` 和 `decomposition-report.json` 的 `ready` 方向，状态即进入 `awaiting_figma` 并继续同步这些成功方向。登录失效、验证码、安全验证和权限问题仍会立即停止并通知用户。
 
 ### 输出结构
 
@@ -215,11 +217,11 @@ YYYY-MM-DD/
 
 ```bash
 npm run setup          # 打开首次登录流程
-npm run test-run       # 3 张参考图、1 个方向的测试运行
+npm run test-run       # 1 张参考图、1 个方向的测试运行
 npm run test-three-types # 弹窗、Banner、浮窗各 1 个的隔离验证运行
 npm run test-transparent-assets -- --image /path/to/preview.png # 只测试透明素材拆分
 npm run find-remix-icon -- --query "shield check" --style line # 检索 Remix Icon SVG
-npm run run            # 20 张参考图、10 个方向的正式运行
+npm run run            # 10 张参考图、10 个方向的正式运行
 npm run run -- --visible # 显式强制可见模式，可覆盖诊断用 browser.mode 配置
 npm run check-missed   # 检查漏跑
 npm run check          # 运行语法检查和自动化测试
@@ -251,7 +253,7 @@ Finance Creative Pipeline is a Codex plugin for daily Chinese internet-finance o
 5. Uses a separate image task in that chat for each non-reconstructable complex visual and saves each result as its own transparent PNG.
 6. Syncs previews, accepted transparent assets, and native text/geometry into Figma.
 
-A normal run collects 20 references and generates 10 original directions: six popups, two banners, and two floating creatives.
+A normal run collects 10 references and generates 10 original directions: six popups, two banners, and two floating creatives, with one type-matched reference per direction.
 
 ### Design Principles
 
@@ -354,15 +356,17 @@ User configuration lives outside the repository and should never be committed:
 | `collection.maxFloatHeightToWidthRatio` | Maximum float-reference height-to-width ratio; defaults to 2 to reject full phone screens |
 | `collection.searchPlans` | Type-specific quotas and queries for popup, Banner, and floating references |
 | `generation.directionCount` | Number of original directions |
-| `generation.maxRetries` | Maximum retries per direction |
+| `generation.analysisTimeoutMinutes` | Maximum wait per step 6 reference-analysis attempt; defaults to 5 minutes |
+| `generation.analysisMaxAttempts` | Initial step 6 reference-analysis attempts; defaults to 2, followed by one queue-tail final attempt after failure |
+| `generation.maxAttempts` | Total step 7 preview-generation attempts; defaults to 2 |
 | `generation.imageTimeoutMinutes` | Maximum wait per image-generation attempt; defaults to 5 minutes |
-| `generation.decompositionTimeoutMinutes` | Maximum wait per decomposition analysis attempt; defaults to 6 minutes |
-| `generation.decompositionMaxAttempts` | Independent decomposition attempts; defaults to 3 and does not consume generation retries |
+| `generation.decompositionTimeoutMinutes` | Maximum wait per step 8 semantic-decomposition attempt; defaults to 5 minutes |
+| `generation.decompositionMaxAttempts` | Total step 8 semantic-decomposition attempts; defaults to 2 |
 | `chatgpt.dailyProjects` | Create or reuse one dated ChatGPT project per day; enabled by default |
 | `chatgpt.projectNamePrefix` | Prefix for dated project names; defaults to `金融运营素材` |
 | `transparentAssets.maxAssets` | Maximum non-reconstructable complex assets per direction; defaults to 4 |
-| `transparentAssets.timeoutMinutes` | ChatGPT wait limit for each separate asset; defaults to 10 minutes |
-| `transparentAssets.maxCorrectionAttempts` | Corrective regeneration attempts per rejected asset; defaults to 1 |
+| `transparentAssets.timeoutMinutes` | Maximum wait per step 9 separate-asset attempt; defaults to 5 minutes |
+| `transparentAssets.maxAttempts` | Total step 9 attempts per separate asset; defaults to 2 |
 | `transparentAssets.minForegroundRatio` | Minimum foreground ratio per asset |
 | `transparentAssets.maxForegroundRatio` | Maximum foreground ratio per asset |
 | `transparentAssets.minTransparentRatio` | Minimum transparent-pixel ratio per asset |
@@ -385,13 +389,13 @@ Primary states:
 | State | Meaning |
 | --- | --- |
 | `running` | Local collection, generation, or decomposition is active |
-| `awaiting_figma` | Local artifacts are complete and Figma sync may begin |
+| `awaiting_figma` | The ChatGPT phase is over and at least one complete direction can be synced; failures remain auditable |
 | `complete` | Figma sync and visual verification are complete |
 | `blocked` | Login, CAPTCHA, permissions, or another external issue requires user action |
 
 Always inspect the existing `run.json` and `figma-manifest.json` before resuming. If local generation is already complete, continue only the Figma stage.
 
-Reference analysis and preview generation share the direction retry budget, but a successfully saved preview is never regenerated. Decomposition has three independent attempts. After a timeout, the runtime reloads the same direction chat, checks for a delayed reply, and only then reuploads the existing `preview.png` and resends the decomposition prompt. Three failures are recorded with `stage: decomposition`, later directions continue, and the next run resumes decomposition without recollecting references or regenerating the preview. Login expiry, CAPTCHA, security checks, and permission issues still stop immediately and notify the user.
+Steps 6 through 9 each have independent two-attempt budgets with a five-minute limit per attempt. A direction that fails both step 6 attempts is skipped and appended once to the end of the queue for one final analysis attempt. Step 9 retries are not nested inside step 8 retries. Directions that were already failed at run start are processed after new directions and receive one final attempt. Remaining failures stay in `figma-manifest.json.failures`, the day's ChatGPT phase ends, and any `ready` directions with valid `preview.png`, `layers.json`, and `decomposition-report.json` continue to Figma. Login expiry, CAPTCHA, security checks, and permission issues still stop immediately and notify the user.
 
 ### Output Layout
 
@@ -439,11 +443,11 @@ See [`skills/finance-creative-pipeline/references/figma-sync.md`](skills/finance
 
 ```bash
 npm run setup          # Open first-login setup
-npm run test-run       # Test with 3 references and 1 direction
+npm run test-run       # Test with 1 reference and 1 direction
 npm run test-three-types # Isolated validation with one popup, Banner, and float
 npm run test-transparent-assets -- --image /path/to/preview.png # Test transparent separation only
 npm run find-remix-icon -- --query "shield check" --style line # Search Remix Icon SVGs
-npm run run            # Normal 20-reference, 10-direction run
+npm run run            # Normal 10-reference, 10-direction run
 npm run run -- --visible # Explicitly force visible mode, overriding diagnostic browser.mode settings
 npm run check-missed   # Check for a missed scheduled run
 npm run check          # Run syntax checks and automated tests

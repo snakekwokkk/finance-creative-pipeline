@@ -15,7 +15,7 @@
     "pageId": "0:1"
   },
   "collection": {
-    "referenceCount": 20,
+    "referenceCount": 10,
     "minReferenceWidthPx": 720,
     "perKeywordLimit": 2,
     "maxSearchScrolls": 20,
@@ -23,34 +23,35 @@
     "searchPlans": [
       {
         "type": "popup",
-        "count": 12,
+        "count": 6,
         "keywords": ["互联网金融 弹窗", "借贷 活动弹窗", "助贷 营销弹窗", "贷款 优惠券弹窗", "金融 福利弹窗", "借款 结果弹窗", "金融 App 弹窗", "贷款 运营弹窗"]
       },
       {
         "type": "banner",
-        "count": 4,
+        "count": 2,
         "keywords": ["金融banner", "理财banner", "投资理财banner", "金融产品banner", "基金理财banner", "证券banner", "简约金融banner"]
       },
       {
         "type": "float",
-        "count": 4,
+        "count": 2,
         "keywords": ["浮窗", "小浮窗", "悬浮窗素材", "活动浮窗", "红包浮窗", "福利浮窗", "悬浮按钮", "活动浮标"]
       }
     ]
   },
   "generation": {
     "directionCount": 10,
-    "maxRetries": 2,
+    "maxAttempts": 2,
     "brandNeutral": true,
-    "analysisTimeoutMinutes": 6,
-    "decompositionTimeoutMinutes": 6,
-    "decompositionMaxAttempts": 3,
+    "analysisTimeoutMinutes": 5,
+    "analysisMaxAttempts": 2,
+    "decompositionTimeoutMinutes": 5,
+    "decompositionMaxAttempts": 2,
     "imageTimeoutMinutes": 5
   },
   "transparentAssets": {
     "maxAssets": 4,
-    "timeoutMinutes": 10,
-    "maxCorrectionAttempts": 1,
+    "timeoutMinutes": 5,
+    "maxAttempts": 2,
     "minForegroundRatio": 0.005,
     "maxForegroundRatio": 0.82,
     "minTransparentRatio": 0.18,

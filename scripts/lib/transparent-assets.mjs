@@ -113,6 +113,11 @@ function safeId(value) {
   return String(value || "asset").replace(/[^a-z0-9_-]+/gi, "-");
 }
 
+export function separateAssetFile(outputDir, layer) {
+  const filename = `${String(layer.assetIndex + 1).padStart(2, "0")}-${safeId(layer.id)}.png`;
+  return path.join(outputDir, filename);
+}
+
 function nativeExtractionMode(layer) {
   if (layer.kind === "background" || layer.editable === "background") return "native-background";
   if (layer.kind === "text" || layer.editable === "text") return "native-text";
@@ -138,8 +143,7 @@ export async function validateSeparateAsset({ candidateFile, layer, outputDir, t
     };
   }
   await fs.mkdir(outputDir, { recursive: true });
-  const filename = `${String(layer.assetIndex + 1).padStart(2, "0")}-${safeId(layer.id)}.png`;
-  const outputFile = path.join(outputDir, filename);
+  const outputFile = separateAssetFile(outputDir, layer);
   const trimmed = await sharp(candidateFile)
     .trim({ background: { r: 0, g: 0, b: 0, alpha: 0 }, threshold: 8 })
     .png()
@@ -154,6 +158,24 @@ export async function validateSeparateAsset({ candidateFile, layer, outputDir, t
     file: path.resolve(outputFile),
     intrinsicPx: { width: metadata.width, height: metadata.height }
   };
+}
+
+export async function recoverAcceptedAsset({ layer, outputDir, thresholds = {} }) {
+  const file = separateAssetFile(outputDir, layer);
+  try {
+    if ((await fs.stat(file)).size < 100) return null;
+    const metadata = await sharp(file).metadata();
+    if (!metadata.hasAlpha || !metadata.width || !metadata.height) return null;
+    return {
+      status: "accepted",
+      engine: TRANSPARENT_ASSET_ENGINE,
+      recovered: true,
+      file: path.resolve(file),
+      intrinsicPx: { width: metadata.width, height: metadata.height }
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function writeDecompositionReport({ plan, sourceImage, outputDir, assetResults }) {

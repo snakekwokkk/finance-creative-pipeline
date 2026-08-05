@@ -7,7 +7,8 @@ Use this reference only after a local run has produced `figma-manifest.json`.
 - Load the `figma-use` and `figma-generate-design` skills completely.
 - Ensure plugin dependencies are installed so `node_modules/remixicon/icons/` and `npm run find-remix-icon` are available.
 - Read the manifest and every referenced `spec.json`.
-- Read every referenced `layers.json` and `layers/decomposition-report.json`. Treat confidence and warnings as evidence, not optional notes.
+- Sync only manifest directions whose status is `ready` and whose `preview.png`, `layers.json`, and `layers/decomposition-report.json` all exist and validate. Ignore retained `failures` except as audit evidence.
+- Read every ready direction's `layers.json` and `layers/decomposition-report.json`. Treat confidence and warnings as evidence, not optional notes.
 - Use `fileKey` and `pageId` from the manifest. Do not guess them.
 - Inspect the page and existing date sections before writing.
 
@@ -19,7 +20,7 @@ For each direction create a frame named `NN/type` containing:
 
 - `Preview`: rectangle receiving `preview.png` as an image fill.
 - `Editable`: frame containing a locked hidden `Visual Base` and visible `Editable Elements` made from accepted ChatGPT-separated transparent PNGs, native OCR text, buttons, vectors, and semantic metadata. Never use the flattened preview as the visible editable-side output. For popup directions the outer canvas is transparent and contains only the popup body; Banner and float directions may contain native backgrounds.
-- `Sources`: small text containing the two source URLs.
+- `Sources`: small text containing the direction's single source URL.
 - `Keywords`: small text containing the extracted keywords.
 
 Use these sizes:
