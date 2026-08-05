@@ -39,13 +39,13 @@ Finance Creative Pipeline 是一个面向中国互联网金融运营素材的 Co
 - ChatGPT 必须从原图单独提取并保持造型、比例、颜色、光影和细节，不得重新设计；本地不运行 Apple Vision 或其他 AI 抠图模型。
 - 本地只裁掉透明空白并执行 Alpha 与边界质量检查，不会推断前景蒙版。
 - 没有真实 Alpha、带底色、内容为空或触碰图片边界的素材会被拒绝，也不会上传到 Figma。
-- 每个运行日期只使用一个名为 `金融运营素材 YYYY-MM-DD` 的 ChatGPT 项目，每个设计方向只使用一个聊天。项目 URL 和方向聊天 URL 都会写入清单，失败重试或断点恢复时继续原聊天，不会为拆图或单个素材另外新建聊天。
+- 每个运行日期只使用一个名为 `金融运营素材 YYYY-MM-DD` 的 ChatGPT 项目。候选内容审核聊天 `采集筛选-弹窗/Banner/浮窗` 和正式方向聊天都保存在该日期项目内；每个设计方向仍只使用一个聊天完成分析、生图、拆图和透明素材提取。
 - 项目内聊天会显式命名为 `弹窗1` 至 `弹窗6`、`Banner1` 至 `Banner2`、`浮窗1` 至 `浮窗2`；编号在各素材类型内独立计算，验证运行中的每个类型从 1 开始。
 - 参考图使用 ChatGPT 图片专用上传控件；只有该方向 1 张附件的文件名、缩略图和发送状态全部验证通过后才发送分析提示词。若 ChatGPT 回复未收到图片，流水线会清理草稿并重新上传，不会继续无图生图。
 - 流水线从 `run.json` 和 `figma-manifest.json` 恢复，避免重复采集、重复生成和重复创建 Figma 日期分区。
-- 参考图按类型采集：弹窗、Banner、浮窗分别使用匹配的关键词池和数量配额，不混用搜索词。Banner 词库使用 `金融banner`、`理财banner`、`投资理财banner` 等金融垂类词，优先寻找结构简洁的横向设计；浮窗使用 `金融 活动浮窗`、`借款 福利浮窗`、`金融 福利入口` 等金融运营词，并通过标题语义与透明独立主体结构排除纯背景、边框、普通按钮、文字贴纸和完整页面。
-- 浮窗不使用 720px 最低宽度或高宽比门槛，小尺寸素材可以通过；内容必须是完整、独立的运营浮窗、浮标、活动入口或挂件。被拒绝的 Pin 会继续向下补采，并写入根目录及当天目录的 `reference-rejections.json`。
-- 弹窗和 Banner 继续使用默认 720px 最低宽度门槛，并增加标题与视觉结构验收。弹窗需是完整弹窗/金融运营场景，具有主体与遮罩或页面背景层级；Banner 需同时具备金融业务与横向营销成品语义，且宽高比至少 1.5。其他行业、整页活动图、背景、按钮、贴纸、单个元素和模板会被拒绝并继续补采。
+- 参考图按类型采集：弹窗、Banner、浮窗分别使用匹配的关键词池和数量配额，不混用搜索词。搜索词负责方向，尺寸和透明度负责基础过滤，ChatGPT Web 根据图片实际内容做最终判断；花瓣标题只用于快速排除明确写着背景、按钮、原子元素、模板或其他行业的候选。
+- 每个缺失方向最多扫描 30 个未见 Pin，每个关键词最多取 3 个候选，最多临时下载 8 张；候选按每批最多 4 张放入当天项目中的类型筛选聊天。只有同时通过类型、完整成品、金融相关、结构有效、可用性和最低 75 分的图片才会正式进入 `references/`，失败临时文件会删除并记录审核原因。
+- 弹窗和 Banner 保留默认 720px 最低宽度，Banner 继续要求宽高比至少 1.5；浮窗不使用正常宽度或高宽比门槛，但必须有真实透明留白。模糊标题、文件名和 `IMG_*` 不再直接淘汰，都会进入看图审核。
 - `reference-history.json` 长期记录已采集 Pin 和图片指纹；后续运行会跳过历史 Pin 和相同图片并继续滚动检索，不会误删仅仅版式相似的素材。
 - Figma 左侧始终是完整预览，右侧必须是可见的可编辑重建，禁止左右两边显示同一张扁平图。
 
@@ -96,6 +96,12 @@ npm run setup
 npm run test-run
 ```
 
+只验证 1 张弹窗参考图采集，成功后立即停止，不进入生图、拆图或 Figma：
+
+```bash
+npm run test-popup-collection
+```
+
 正式运行：
 
 ```bash
@@ -127,7 +133,13 @@ codex plugin add finance-creative-pipeline@<marketplace-name>
 | `figma.pageId` | 目标 Figma 页面 ID |
 | `collection.referenceCount` | 正式运行采集的参考图数量 |
 | `collection.minReferenceWidthPx` | 弹窗和 Banner 详情图的最低像素宽度，默认 720；浮窗不使用此门槛 |
-| `collection.perKeywordLimit` | 单个搜索词最多接受的参考图数量 |
+| `collection.maxScannedCandidatesPerDirection` | 每个缺失方向最多浏览的 Pin 数，默认 30 |
+| `collection.maxCandidatesPerKeyword` | 每次搜索词轮换最多取得的候选数，默认 3 |
+| `collection.maxDownloadedCandidatesPerDirection` | 每个缺失方向最多临时下载并验证的图片数，默认 8 |
+| `collection.visualReviewBatchSize` | 单次 ChatGPT 内容审核最多附件数，默认 4 |
+| `collection.visualReviewTimeoutMinutes` | 单次候选内容审核等待上限，默认 2 分钟 |
+| `collection.visualReviewMaxAttempts` | 每批候选内容审核总尝试次数，默认 2 |
+| `collection.visualReviewMinimumScore` | 候选图片内容审核最低分，默认 75 |
 | `collection.maxSearchScrolls` | 为寻找未采集 Pin 执行的最大滚动次数 |
 | `collection.searchPlans` | 弹窗、Banner、浮窗各自的配额和搜索词列表 |
 | `generation.directionCount` | 原创方向数量 |
@@ -162,13 +174,15 @@ codex plugin add finance-creative-pipeline@<marketplace-name>
 | 状态 | 含义 |
 | --- | --- |
 | `running` | 本地采集、生成或分解正在进行 |
+| `collection_complete` | 仅采集测试已成功完成；生图、拆图和 Figma 均未开始 |
+| `collection_incomplete` | 仅采集测试未找到足量合格参考图；后续阶段未开始 |
 | `awaiting_figma` | ChatGPT 阶段结束，至少一个完整方向可以开始 Figma 同步；失败方向保留审计记录 |
 | `complete` | Figma 同步和视觉核验完成 |
 | `blocked` | 需要用户处理登录、验证码、权限或其他外部阻塞 |
 
 恢复任务时先读取已有 `run.json` 和 `figma-manifest.json`。如果本地阶段已经完成，只继续 Figma 同步，不要重新运行采集和生成。
 
-第 6 步参考分析、第 7 步预览生成、第 8 步语义分层和第 9 步逐素材透明 PNG 提取分别拥有独立的两次尝试，每次等待最多 5 分钟。第 6 步两次失败后先跳过该方向，并在所有方向结束后再尝试 1 次；第 9 步不会嵌套进第 8 步重试而放大次数。运行开始时已有的历史失败方向会排到新方向之后，且只获得一次最终尝试。最终仍失败的方向保留在 `figma-manifest.json.failures`，当天 ChatGPT 阶段随即结束；只要存在具备有效 `preview.png`、`layers.json` 和 `decomposition-report.json` 的 `ready` 方向，状态即进入 `awaiting_figma` 并继续同步这些成功方向。登录失效、验证码、安全验证和权限问题仍会立即停止并通知用户。
+参考采集先执行内容审核：每个缺失方向最多扫描 30 个候选、临时下载 8 张，每批最多 4 张且最多提交两次。第 6 步参考分析、第 7 步预览生成、第 8 步语义分层和第 9 步逐素材透明 PNG 提取仍分别拥有独立的两次尝试，每次等待最多 5 分钟。最终失败方向保留在 `figma-manifest.json.failures`；只要存在完整 `ready` 方向，仍进入 `awaiting_figma` 并继续同步成功方向。登录失效、验证码、安全验证和权限问题会立即停止并通知用户。
 
 ### 输出结构
 
@@ -177,6 +191,8 @@ YYYY-MM-DD/
 ├── run.json
 ├── figma-manifest.json
 ├── reference-rejections.json
+├── reference-audit-chats.json
+├── reference-audits/
 ├── references/
 └── directions/
     └── 01/
@@ -267,13 +283,13 @@ A normal run collects 10 references and generates 10 original directions: six po
 - ChatGPT must extract each selected element separately while preserving its original shape, proportions, color, lighting, and details; no Apple Vision or downloaded local matting model is used.
 - Local processing only trims transparent margins and validates Alpha and image boundaries.
 - Opaque, colored-background, empty, or boundary-touching assets are rejected and never uploaded to Figma.
-- Each run date uses one ChatGPT project named `金融运营素材 YYYY-MM-DD`, with exactly one chat per design direction. Project and direction-chat URLs are persisted so retries and resumed runs continue the original chat instead of creating decomposition or per-asset chats.
+- Each run date uses one ChatGPT project named `金融运营素材 YYYY-MM-DD`. The `采集筛选-弹窗/Banner/浮窗` content-audit chats and every direction-generation chat stay inside that dated project. Each design direction still uses exactly one chat for analysis, generation, decomposition, and transparent assets.
 - Project chats are explicitly renamed with type-local numbering: `弹窗1`–`弹窗6`, `Banner1`–`Banner2`, and `浮窗1`–`浮窗2`. Isolated validation runs start each included type at 1 instead of using the global direction index.
 - Reference images use ChatGPT's image-specific upload input. The analysis prompt is sent only after every expected filename, image thumbnail, and send-ready state is verified. If ChatGPT reports missing images, the composer is cleared and all references are uploaded again instead of continuing without visual references.
 - Resume from `run.json` and `figma-manifest.json` to avoid duplicate collection, generation, or dated Figma sections.
-- Collect popup, Banner, and floating-window references from separate type-matched keyword pools and quotas. Banner queries use finance-specific terms such as `金融banner`, `理财banner`, and `投资理财banner`, favoring simple horizontal compositions. Floating references use finance-operations queries such as `金融 活动浮窗`, `借款 福利浮窗`, and `金融 福利入口`, then apply title semantics and transparent standalone-subject checks to reject backgrounds, borders, plain buttons, text stickers, and full pages.
-- Floating references do not use the 720 px minimum-width or aspect-ratio gates, so genuinely small floating creatives remain eligible. Rejected Pins are replaced by deeper search results and recorded with reasons in root and daily `reference-rejections.json` ledgers.
-- Popup and Banner references retain the configured 720 px minimum-width gate and additionally pass title and visual-structure audits. Popups must present a complete modal with a distinct surrounding layer; Banners must contain finance plus finished horizontal-marketing semantics and use an aspect ratio of at least 1.5. Full pages, unrelated industries, backgrounds, atomic buttons/elements, stickers, and templates are rejected and replaced.
+- Collect popup, Banner, and floating references from separate type-matched keyword pools. Queries establish discovery direction, technical checks enforce dimensions and Alpha, and ChatGPT Web makes the final decision from actual image content. Titles only hard-reject candidates that explicitly describe backgrounds, buttons, atomic elements, templates, full pages, or unrelated industries.
+- For each missing direction, scan up to 30 unseen Pins, rotate after at most three candidates per query, and temporarily download up to eight images. Review up to four attachments per batch in the dated project's type-specific audit chat. Accept only images that pass type match, complete-design, finance relevance, structure, usability, and the default score threshold of 75; delete rejected temporary files after recording the evidence.
+- Popup and Banner references retain the 720 px minimum-width gate, and Banners retain an aspect ratio of at least 1.5. Floating references have no normal width or aspect-ratio gate but require genuine transparent margin. Ambiguous titles, filenames, and `IMG_*` labels proceed to image-content review instead of being rejected.
 - Keep accepted Pin IDs and image fingerprints in `reference-history.json`; later runs skip historical Pins and identical images and continue scrolling, without rejecting merely similar layouts.
 - The Figma preview stays on the left. The right side must visibly render editable layers and must never duplicate the same flattened image.
 
@@ -355,7 +371,13 @@ User configuration lives outside the repository and should never be committed:
 | `figma.pageId` | Target Figma page ID |
 | `collection.referenceCount` | Number of references in a normal run |
 | `collection.minReferenceWidthPx` | Minimum detail-image width for popup and Banner references; defaults to 720 and does not apply to floats |
-| `collection.perKeywordLimit` | Maximum accepted references from one search query |
+| `collection.maxScannedCandidatesPerDirection` | Maximum Pins browsed per missing direction; defaults to 30 |
+| `collection.maxCandidatesPerKeyword` | Maximum candidates taken before rotating a query; defaults to 3 |
+| `collection.maxDownloadedCandidatesPerDirection` | Maximum temporary downloads per missing direction; defaults to 8 |
+| `collection.visualReviewBatchSize` | Maximum images in one ChatGPT content-audit batch; defaults to 4 |
+| `collection.visualReviewTimeoutMinutes` | Maximum wait for one content-audit response; defaults to 2 minutes |
+| `collection.visualReviewMaxAttempts` | Content-audit attempts per batch; defaults to 2 |
+| `collection.visualReviewMinimumScore` | Minimum image-content score; defaults to 75 |
 | `collection.maxSearchScrolls` | Maximum scroll attempts used to find unseen Pins |
 | `collection.searchPlans` | Type-specific quotas and queries for popup, Banner, and floating references |
 | `generation.directionCount` | Number of original directions |
@@ -398,7 +420,7 @@ Primary states:
 
 Always inspect the existing `run.json` and `figma-manifest.json` before resuming. If local generation is already complete, continue only the Figma stage.
 
-Steps 6 through 9 each have independent two-attempt budgets with a five-minute limit per attempt. A direction that fails both step 6 attempts is skipped and appended once to the end of the queue for one final analysis attempt. Step 9 retries are not nested inside step 8 retries. Directions that were already failed at run start are processed after new directions and receive one final attempt. Remaining failures stay in `figma-manifest.json.failures`, the day's ChatGPT phase ends, and any `ready` directions with valid `preview.png`, `layers.json`, and `decomposition-report.json` continue to Figma. Login expiry, CAPTCHA, security checks, and permission issues still stop immediately and notify the user.
+Reference collection scans at most 30 Pins and temporarily downloads at most eight images per missing direction. Content-audit batches contain at most four images and receive two submission attempts. Steps 6 through 9 retain independent two-attempt budgets with a five-minute limit per attempt. Remaining failures stay in `figma-manifest.json.failures`, while valid `ready` directions continue to Figma. Login expiry, CAPTCHA, security checks, and permission issues still stop immediately and notify the user.
 
 ### Output Layout
 
@@ -407,6 +429,8 @@ YYYY-MM-DD/
 ├── run.json
 ├── figma-manifest.json
 ├── reference-rejections.json
+├── reference-audit-chats.json
+├── reference-audits/
 ├── references/
 └── directions/
     └── 01/

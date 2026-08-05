@@ -8,6 +8,7 @@
     "run": "node scripts/run.mjs",
     "test-run": "node scripts/run.mjs --test",
     "test-three-types": "node scripts/run.mjs --types popup,banner,float",
+    "test-popup-collection": "node scripts/run.mjs --types popup --collection-only --visible",
     "test-transparent-assets": "node scripts/test-transparent-assets.mjs",
     "find-remix-icon": "node scripts/find-remix-icon.mjs",
     "check-missed": "node scripts/check-missed.mjs",

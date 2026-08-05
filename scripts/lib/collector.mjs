@@ -40,7 +40,8 @@ const DEFAULT_SEARCH_PLANS = [
     count: 2,
     keywords: [
       "金融 活动浮窗", "借款 福利浮窗", "贷款 红包浮窗", "理财 活动浮标",
-      "金融 福利入口", "金融 悬浮入口", "借贷 活动挂件", "金融 运营浮标"
+      "金融 福利入口", "金融 悬浮入口", "借贷 活动挂件", "金融 运营浮标",
+      "金融 运营贴片", "借款 活动贴片"
     ]
   }
 ];
@@ -68,24 +69,30 @@ export function minimumReferenceWidth(type, configuredWidth = 720) {
   return type === "float" ? 1 : Math.max(1, Number(configuredWidth || 720));
 }
 
-export function assessReferenceTitle(type, title) {
+export function assessReferenceTitle(type, title, searchKeyword = "") {
   const value = String(title || "").trim();
+  const query = String(searchKeyword || "").trim();
   const reasons = [];
-  if (!value || /^(?:pin[-_ ]?\d+|img[-_ ]?\d+)$/i.test(value)) reasons.push("Pin 标题为空或无有效语义");
+  const hardReasons = [];
+  const generic = !value
+    || /^(?:pin[-_ ]?\d+|img[-_ ]?\d+)$/i.test(value)
+    || /\.(?:png|jpe?g|webp)(?:\s*\([^)]*\))?$/i.test(value);
+  if (generic) reasons.push("Pin 标题为空、文件名化或无有效语义，必须继续看图审核");
   if (type === "popup") {
-    if (POPUP_ATOMIC_PATTERN.test(value)) reasons.push("标题表明素材是背景、原子元素、按钮、贴纸或海报");
-    if (POPUP_PAGE_PATTERN.test(value) && !POPUP_FORM_PATTERN.test(value)) reasons.push("标题表明素材是完整页面而不是弹窗");
+    if (POPUP_ATOMIC_PATTERN.test(value)) hardReasons.push("标题明确表明素材是背景、原子元素、按钮、贴纸或海报");
+    if (POPUP_PAGE_PATTERN.test(value) && !POPUP_FORM_PATTERN.test(value)) hardReasons.push("标题明确表明素材是完整页面而不是弹窗");
     if (!POPUP_FORM_PATTERN.test(value) && !POPUP_CONTEXT_PATTERN.test(value)) reasons.push("标题缺少弹窗形态或金融运营语义");
   } else if (type === "banner") {
-    if (BANNER_BLOCKED_PATTERN.test(value)) reasons.push("标题表明素材属于其他行业或只是背景、元素、按钮、模板");
+    if (BANNER_BLOCKED_PATTERN.test(value)) hardReasons.push("标题明确表明素材属于其他行业或只是背景、元素、按钮、模板");
     if (!BANNER_CONTEXT_PATTERN.test(value)) reasons.push("标题缺少金融业务语义");
     if (!BANNER_FORM_PATTERN.test(value)) reasons.push("标题未表明这是完整横幅、首图或营销成品");
   } else if (type === "float") {
-    if (FLOAT_BLOCKED_PATTERN.test(value)) reasons.push("标题表明素材是背景、边框、原子按钮/贴纸或完整页面");
-    if (!FLOAT_FORM_PATTERN.test(value)) reasons.push("标题未表明这是完整浮窗、浮标、活动入口或运营挂件");
-    if (!FLOAT_CONTEXT_PATTERN.test(value)) reasons.push("标题缺少金融或活动运营语义");
+    if (FLOAT_BLOCKED_PATTERN.test(value)) hardReasons.push("标题明确表明素材是背景、边框、原子按钮/贴纸或完整页面");
+    if (!FLOAT_FORM_PATTERN.test(value) && !FLOAT_FORM_PATTERN.test(query)) reasons.push("标题和搜索词均未表明这是浮窗、浮标、活动入口、运营挂件或活动贴片");
+    if (!FLOAT_CONTEXT_PATTERN.test(value) && !FLOAT_CONTEXT_PATTERN.test(query)) reasons.push("标题和搜索词均缺少金融或活动运营语义");
   }
-  return { accepted: reasons.length === 0, reasons };
+  const decision = hardReasons.length ? "reject" : reasons.length ? "review" : "accept";
+  return { accepted: decision !== "reject", decision, reasons: [...hardReasons, ...reasons] };
 }
 
 export async function assessPopupReferenceVisual(buffer) {
@@ -130,11 +137,11 @@ export async function assessPopupReferenceVisual(buffer) {
     darkBorderRatio: darkBorderPixels / borderPixels
   };
   metrics.modalContrast = metrics.centerLuma - metrics.borderLuma;
-  const reasons = [];
+  const warnings = [];
   if (metrics.modalContrast < 8 && metrics.darkBorderRatio < 0.15) {
-    reasons.push("画面未呈现可识别的弹窗主体与遮罩/页面背景层级，更像完整活动页");
+    warnings.push("中心与外围亮度层级不明显，必须由图片内容审核确认是否为完整弹窗");
   }
-  return { accepted: reasons.length === 0, reasons, metrics };
+  return { accepted: true, reasons: [], warnings, metrics };
 }
 
 export async function assessBannerReferenceVisual(buffer) {
@@ -258,6 +265,21 @@ export function selectReferencesForPlans(references, plans) {
   return selected;
 }
 
+export function selectAvailableReferencesForPlans(references, plans) {
+  return plans.flatMap((plan) => references
+    .filter((item) => inferReferenceType(item) === plan.type)
+    .slice(0, plan.count));
+}
+
+export function collectionCandidateBudgets(requiredCount, existingCount = 0, collection = {}) {
+  const missing = Math.max(0, Number(requiredCount || 0) - Number(existingCount || 0));
+  return {
+    missing,
+    scanned: missing * Math.max(1, Number(collection.maxScannedCandidatesPerDirection || 30)),
+    downloaded: missing * Math.max(1, Number(collection.maxDownloadedCandidatesPerDirection || 8))
+  };
+}
+
 function historyRecord(item, date) {
   return {
     pinId: item.pinId,
@@ -323,21 +345,33 @@ async function loadReferenceRejections(outputRoot, runDir) {
     readJson(globalFile, { schemaVersion: 1, rejections: [] }),
     readJson(dailyFile, { schemaVersion: 1, rejections: [] })
   ]);
-  const global = Array.isArray(globalData.rejections) ? globalData.rejections : [];
-  const daily = Array.isArray(dailyData.rejections) ? dailyData.rejections : [];
+  const refreshTitleRejection = (item) => {
+    if (item.stage !== "title") return item;
+    const acceptedNow = assessReferenceTitle(item.referenceType, item.title, item.searchKeyword).accepted;
+    if (!acceptedNow) return item.active === false ? { ...item, active: true } : item;
+    return item.active === false ? item : { ...item, active: false, revalidatedAt: new Date().toISOString() };
+  };
+  const global = (Array.isArray(globalData.rejections) ? globalData.rejections : []).map(refreshTitleRejection);
+  const daily = (Array.isArray(dailyData.rejections) ? dailyData.rejections : []).map(refreshTitleRejection);
+  const updatedAt = new Date().toISOString();
+  await Promise.all([
+    writeJsonAtomic(globalFile, { ...globalData, schemaVersion: 1, updatedAt, rejections: global }),
+    writeJsonAtomic(dailyFile, { ...dailyData, schemaVersion: 1, updatedAt, rejections: daily })
+  ]);
+  const activeGlobal = global.filter((item) => item.active !== false);
   return {
     globalFile,
     dailyFile,
     global,
     daily,
-    pinIds: new Set(global.map((item) => item.pinId).filter(Boolean))
+    pinIds: new Set(activeGlobal.map((item) => item.pinId).filter(Boolean))
   };
 }
 
 async function recordReferenceRejection(state, item) {
-  const record = { ...item, rejectedAt: new Date().toISOString() };
+  const record = { ...item, active: true, rejectedAt: new Date().toISOString() };
   if (!state.pinIds.has(record.pinId)) {
-    state.global.push(record);
+    state.global = state.global.filter((existing) => existing.pinId !== record.pinId).concat(record);
     state.pinIds.add(record.pinId);
   }
   state.daily = state.daily.filter((existing) => existing.pinId !== record.pinId).concat(record);
@@ -348,15 +382,18 @@ async function recordReferenceRejection(state, item) {
   ]);
 }
 
-function looksBlocked(text) {
-  return /405|异常访问|安全验证|验证码|访问被阻止|行为验证/.test(text);
+export function looksLikeBlockedPage(text) {
+  const value = String(text || "");
+  return /异常访问|安全验证|验证码|访问被阻止|行为验证/.test(value)
+    || /(?:^|\s)405(?:\s|$)[\s\S]{0,80}(?:method\s+not\s+allowed|not\s+allowed)/i.test(value)
+    || /(?:method\s+not\s+allowed|not\s+allowed)[\s\S]{0,80}(?:^|\s)405(?:\s|$)/i.test(value);
 }
 
 async function chooseSearchBox(page) {
   const started = Date.now();
   while (Date.now() - started < 15_000) {
     const pageText = await page.locator("body").innerText({ timeout: 5_000 }).catch(() => "");
-    if (looksBlocked(pageText)) throw new Error("花瓣要求安全验证，请在专用浏览器窗口中完成后重试");
+    if (looksLikeBlockedPage(pageText)) throw new Error("花瓣要求安全验证，请在专用浏览器窗口中完成后重试");
     const candidates = [
       page.getByRole("textbox"),
       page.locator('input[type="search"]'),
@@ -399,7 +436,7 @@ async function searchPins(page, keyword, needed, excludedPinIds, maxScrolls) {
   await page.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => {});
   await page.waitForTimeout(1800);
   const pageText = await page.locator("body").innerText({ timeout: 15_000 });
-  if (looksBlocked(pageText)) throw new Error("花瓣要求安全验证，请在专用浏览器窗口中完成后重试");
+  if (looksLikeBlockedPage(pageText)) throw new Error("花瓣要求安全验证，请在专用浏览器窗口中完成后重试");
   const collected = new Map();
   for (let attempt = 0; attempt < maxScrolls && collected.size < needed; attempt += 1) {
     for (const row of await collectVisiblePins(page)) {
@@ -424,10 +461,13 @@ function detailImageCandidates(images) {
 }
 
 export async function resolveDetailImageUrls(page, item) {
-  await page.goto(item.sourceUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
+  const response = await page.goto(item.sourceUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
   await page.waitForTimeout(1200);
+  if ([401, 403, 405, 429].includes(response?.status())) {
+    throw new Error(`花瓣详情页返回 HTTP ${response.status()}，请在专用浏览器窗口中完成验证后重试`);
+  }
   const pageText = await page.locator("body").innerText({ timeout: 15_000 });
-  if (looksBlocked(pageText)) throw new Error("花瓣详情页要求安全验证，请在专用浏览器窗口中完成后重试");
+  if (looksLikeBlockedPage(pageText)) throw new Error("花瓣详情页要求安全验证，请在专用浏览器窗口中完成后重试");
 
   const images = await page.locator("img").evaluateAll((nodes) => nodes.map((image) => {
     const rect = image.getBoundingClientRect();
@@ -483,13 +523,53 @@ async function downloadBestImage(context, item, urls, targetFile, minWidth) {
   return best;
 }
 
-async function qualifiedExistingReferences(existing, minWidth, rejectionState) {
+export function referenceCollectionRequiresUserAction(error) {
+  return /登录|验证码|安全验证|异常访问|访问被阻止|权限|account session|access denied|captcha|waf/i
+    .test(String(error?.message || error));
+}
+
+async function reviewCandidateBatch({ visualReviewer, type, candidates, attempts }) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const audit = await visualReviewer({ type, candidates });
+      const byPin = new Map((audit?.candidates || []).map((item) => [String(item.pinId), item]));
+      if (byPin.size !== candidates.length) throw new Error("参考图视觉审核结果数量与候选图不一致");
+      return candidates.map((candidate) => {
+        const result = byPin.get(String(candidate.pinId));
+        if (!result) throw new Error(`参考图视觉审核漏掉 Pin ${candidate.pinId}`);
+        return {
+          candidate,
+          audit: {
+            ...result,
+            chatUrl: audit.chatUrl || null,
+            chatTitle: audit.chatTitle || null,
+            responseFile: audit.responseFile || null,
+            reviewedAt: new Date().toISOString()
+          }
+        };
+      });
+    } catch (error) {
+      if (referenceCollectionRequiresUserAction(error)) throw error;
+      lastError = error;
+      console.warn(`${type} 参考图内容审核第 ${attempt}/${attempts} 次失败：${error.message}`);
+    }
+  }
+  throw new Error(`${type} 参考图内容审核连续 ${attempts} 次失败：${lastError?.message || "未知错误"}`);
+}
+
+async function qualifiedExistingReferences(existing, minWidth, rejectionState, {
+  visualReviewer,
+  visualReviewBatchSize,
+  visualReviewMaxAttempts
+}) {
   const qualified = [];
+  const pending = [];
   for (const item of existing) {
     try {
       const referenceType = inferReferenceType(item);
-      const titleAudit = assessReferenceTitle(referenceType, item.title);
-      if (!titleAudit.accepted) {
+      const titleAudit = assessReferenceTitle(referenceType, item.title, item.searchKeyword);
+      if (titleAudit.decision === "reject") {
         await recordReferenceRejection(rejectionState, {
           pinId: item.pinId,
           referenceType,
@@ -518,56 +598,188 @@ async function qualifiedExistingReferences(existing, minWidth, rejectionState) {
         });
         continue;
       }
-      qualified.push({
+      const candidate = {
         ...item,
         referenceType,
         width: metadata.width,
         height: metadata.height,
         fileSize: stat.size
-      });
+      };
+      if (item.contentAudit?.accepted === true) qualified.push(candidate);
+      else pending.push(candidate);
     } catch {}
+  }
+
+  if (pending.length && typeof visualReviewer !== "function") {
+    throw new Error("参考图内容审核器未配置，不能只凭标题接受缓存素材");
+  }
+  for (const type of ["popup", "banner", "float"]) {
+    const typed = pending.filter((item) => item.referenceType === type);
+    for (let offset = 0; offset < typed.length; offset += visualReviewBatchSize) {
+      const batch = typed.slice(offset, offset + visualReviewBatchSize);
+      const reviewed = await reviewCandidateBatch({
+        visualReviewer,
+        type,
+        candidates: batch,
+        attempts: visualReviewMaxAttempts
+      });
+      for (const { candidate, audit } of reviewed) {
+        if (audit.accepted) {
+          qualified.push({ ...candidate, contentAudit: audit });
+          continue;
+        }
+        await recordReferenceRejection(rejectionState, {
+          pinId: candidate.pinId,
+          referenceType: type,
+          title: candidate.title,
+          sourceUrl: candidate.sourceUrl,
+          searchKeyword: candidate.searchKeyword,
+          stage: "content",
+          reasons: audit.reasons,
+          metrics: audit
+        });
+      }
+    }
   }
   return qualified;
 }
 
-export async function collectReferences({ context, page, detailPage: suppliedDetailPage = null, config, runDir, date, count }) {
+async function cleanupCandidateTempFiles(referencesDir) {
+  const files = await fs.readdir(referencesDir).catch(() => []);
+  await Promise.all(files
+    .filter((file) => /^\.(?:download|candidate)-/.test(file))
+    .map((file) => fs.unlink(path.join(referencesDir, file)).catch(() => {})));
+}
+
+export async function collectReferences({
+  context,
+  page,
+  detailPage: suppliedDetailPage = null,
+  config,
+  runDir,
+  date,
+  count,
+  visualReviewer
+}) {
   const referencesDir = path.join(runDir, "references");
   await fs.mkdir(referencesDir, { recursive: true });
+  await cleanupCandidateTempFiles(referencesDir);
   const existing = await readJson(path.join(runDir, "references.json"), []);
   const minWidth = Math.max(1, Number(config.collection.minReferenceWidthPx || 720));
-  const perKeywordLimit = Math.max(1, Number(config.collection.perKeywordLimit || 2));
   const maxSearchScrolls = Math.max(1, Number(config.collection.maxSearchScrolls || 20));
+  const maxCandidatesPerKeyword = Math.max(1, Number(config.collection.maxCandidatesPerKeyword || 3));
+  const visualReviewBatchSize = Math.max(1, Math.min(4, Number(config.collection.visualReviewBatchSize || 4)));
+  const visualReviewMaxAttempts = Math.max(1, Number(config.collection.visualReviewMaxAttempts || 2));
   const plans = buildSearchPlans(config.collection, count, date);
   const rejectionState = await loadReferenceRejections(config.outputRoot, runDir);
-  const results = await qualifiedExistingReferences(existing, minWidth, rejectionState);
-  if (results.length !== existing.length) await writeJsonAtomic(path.join(runDir, "references.json"), results);
+  const results = await qualifiedExistingReferences(existing, minWidth, rejectionState, {
+    visualReviewer,
+    visualReviewBatchSize,
+    visualReviewMaxAttempts
+  });
+  if (existing.length) await writeJsonAtomic(path.join(runDir, "references.json"), results);
   const existingSelection = selectReferencesForPlans(results, plans);
   if (existingSelection) return existingSelection;
+  if (typeof visualReviewer !== "function") throw new Error("参考图内容审核器未配置，不能只凭标题采集素材");
 
   const history = await loadReferenceHistory(config.outputRoot);
   const detailPage = suppliedDetailPage || await context.newPage();
   const attemptedPinIds = new Set();
+  const referenceFiles = await fs.readdir(referencesDir).catch(() => []);
+  let nextReferenceIndex = Math.max(0, ...referenceFiles
+    .map((file) => Number(file.match(/^(\d+)-/)?.[1] || 0))) + 1;
 
   try {
     for (const plan of plans) {
       const existingForType = results.filter((item) => item.referenceType === plan.type).length;
       let acceptedForType = existingForType;
-      for (const query of plan.keywords) {
-        if (acceptedForType >= plan.count) break;
+      const budgets = collectionCandidateBudgets(plan.count, existingForType, config.collection);
+      let scannedCandidates = 0;
+      let downloadedCandidates = 0;
+      let queryCursor = 0;
+      let emptyQueries = 0;
+      const reviewQueue = [];
+
+      const flushReviewQueue = async () => {
+        if (!reviewQueue.length || acceptedForType >= plan.count) {
+          while (reviewQueue.length) await fs.unlink(reviewQueue.shift().file).catch(() => {});
+          return;
+        }
+        const batch = reviewQueue.splice(0, visualReviewBatchSize);
+        let reviewed;
+        try {
+          reviewed = await reviewCandidateBatch({
+            visualReviewer,
+            type: plan.type,
+            candidates: batch,
+            attempts: visualReviewMaxAttempts
+          });
+        } catch (error) {
+          for (const candidate of batch) await fs.unlink(candidate.file).catch(() => {});
+          if (referenceCollectionRequiresUserAction(error)) throw error;
+          console.warn(`${plan.type} 候选批次内容审核失败，已跳过该批并继续：${error.message}`);
+          return;
+        }
+        reviewed.sort((left, right) => Number(right.audit.score || 0) - Number(left.audit.score || 0));
+        for (const { candidate, audit } of reviewed) {
+          if (audit.accepted && acceptedForType < plan.count) {
+            const extension = candidate.format === "png" ? "png" : candidate.format === "webp" ? "webp" : "jpg";
+            const file = path.join(referencesDir, `${String(nextReferenceIndex).padStart(2, "0")}-${candidate.pinId}.${extension}`);
+            nextReferenceIndex += 1;
+            await fs.rename(candidate.file, file);
+            const record = {
+              ...candidate,
+              file,
+              contentAudit: audit,
+              collectedAt: new Date().toISOString()
+            };
+            delete record.format;
+            results.push(record);
+            acceptedForType += 1;
+            await appendReferenceHistory(history, record, date);
+            await writeJsonAtomic(path.join(runDir, "references.json"), results);
+            continue;
+          }
+          if (!audit.accepted) {
+            await recordReferenceRejection(rejectionState, {
+              pinId: candidate.pinId,
+              referenceType: plan.type,
+              title: candidate.title,
+              sourceUrl: candidate.sourceUrl,
+              searchKeyword: candidate.searchKeyword,
+              stage: "content",
+              reasons: audit.reasons,
+              metrics: audit
+            });
+          }
+          await fs.unlink(candidate.file).catch(() => {});
+        }
+      };
+
+      while (acceptedForType < plan.count
+        && scannedCandidates < budgets.scanned
+        && downloadedCandidates < budgets.downloaded
+        && emptyQueries < plan.keywords.length * 2) {
+        const query = plan.keywords[queryCursor % plan.keywords.length];
+        queryCursor += 1;
         const excluded = new Set([...history.pinIds, ...rejectionState.pinIds, ...attemptedPinIds]);
         const candidates = await searchPins(
           page,
           query,
-          Math.max(8, perKeywordLimit * 4),
+          Math.min(maxCandidatesPerKeyword, budgets.scanned - scannedCandidates),
           excluded,
           maxSearchScrolls
         );
-        let acceptedForQuery = 0;
+        if (!candidates.length) emptyQueries += 1;
+        else emptyQueries = 0;
         for (const candidate of candidates) {
-          if (acceptedForType >= plan.count || acceptedForQuery >= perKeywordLimit) break;
+          if (acceptedForType >= plan.count
+            || scannedCandidates >= budgets.scanned
+            || downloadedCandidates >= budgets.downloaded) break;
+          scannedCandidates += 1;
           attemptedPinIds.add(candidate.pinId);
-          const titleAudit = assessReferenceTitle(plan.type, candidate.title);
-          if (!titleAudit.accepted) {
+          const titleAudit = assessReferenceTitle(plan.type, candidate.title, query);
+          if (titleAudit.decision === "reject") {
             await recordReferenceRejection(rejectionState, {
               pinId: candidate.pinId,
               referenceType: plan.type,
@@ -580,14 +792,16 @@ export async function collectReferences({ context, page, detailPage: suppliedDet
             console.warn(`跳过 Pin ${candidate.pinId}：${titleAudit.reasons.join("；")}`);
             continue;
           }
-          const tempFile = path.join(referencesDir, `.tmp-${candidate.pinId}`);
+          downloadedCandidates += 1;
+          const downloadFile = path.join(referencesDir, `.download-${candidate.pinId}`);
+          let candidateFile = downloadFile;
           try {
             const urls = await resolveDetailImageUrls(detailPage, candidate);
             const downloaded = await downloadBestImage(
               context,
               candidate,
               urls,
-              tempFile,
+              downloadFile,
               minimumReferenceWidth(plan.type, minWidth)
             );
             const { buffer, metadata, imageUrl, fileSize } = downloaded;
@@ -603,56 +817,67 @@ export async function collectReferences({ context, page, detailPage: suppliedDet
                 reasons: visualAudit.reasons,
                 metrics: visualAudit.metrics
               });
-              await fs.unlink(tempFile).catch(() => {});
+              await fs.unlink(downloadFile).catch(() => {});
               console.warn(`跳过 Pin ${candidate.pinId}：${visualAudit.reasons.join("；")}`);
               continue;
             }
             const sha256 = crypto.createHash("sha256").update(buffer).digest("hex");
             const ahash = await averageHash(buffer);
-            if (isSameImage({ sha256, ahash, width: metadata.width, height: metadata.height }, history.references)) {
-              await fs.unlink(tempFile).catch(() => {});
+            const duplicatePool = [...history.references, ...results, ...reviewQueue];
+            if (isSameImage({ sha256, ahash, width: metadata.width, height: metadata.height }, duplicatePool)) {
+              await fs.unlink(downloadFile).catch(() => {});
               continue;
             }
             const extension = metadata.format === "png" ? "png" : metadata.format === "webp" ? "webp" : "jpg";
-            const index = results.length + 1;
-            const file = path.join(referencesDir, `${String(index).padStart(2, "0")}-${candidate.pinId}.${extension}`);
-            await fs.rename(tempFile, file);
-            const record = {
+            candidateFile = path.join(referencesDir, `.candidate-${plan.type}-${candidate.pinId}.${extension}`);
+            await fs.rename(downloadFile, candidateFile);
+            reviewQueue.push({
               ...candidate,
               referenceType: plan.type,
               imageUrl,
-              file,
+              file: candidateFile,
               width: metadata.width,
               height: metadata.height,
               fileSize,
               searchKeyword: query,
               sha256,
               ahash,
-              collectedAt: new Date().toISOString()
-            };
-            results.push(record);
-            acceptedForType += 1;
-            acceptedForQuery += 1;
-            await appendReferenceHistory(history, record, date);
-            await writeJsonAtomic(path.join(runDir, "references.json"), results);
+              format: metadata.format,
+              titleAudit
+            });
+            if (reviewQueue.length >= visualReviewBatchSize) await flushReviewQueue();
           } catch (error) {
-            await fs.unlink(tempFile).catch(() => {});
+            await fs.unlink(candidateFile).catch(() => {});
+            if (referenceCollectionRequiresUserAction(error)) throw error;
+            if (/低于\s*\d+px\s*宽度门槛/.test(error.message)) {
+              await recordReferenceRejection(rejectionState, {
+                pinId: candidate.pinId,
+                referenceType: plan.type,
+                title: candidate.title,
+                sourceUrl: candidate.sourceUrl,
+                searchKeyword: query,
+                stage: "technical",
+                reasons: [error.message]
+              });
+            }
             console.warn(`跳过 Pin ${candidate.pinId}：${error.message}`);
           }
         }
       }
+      await flushReviewQueue();
       if (acceptedForType < plan.count) {
-        throw new Error(`${plan.type} 参考图仅采集到 ${acceptedForType}/${plan.count}，请补充该类型搜索词或处理花瓣页面状态`);
+        console.warn(`${plan.type} 参考图仅采集到 ${acceptedForType}/${plan.count}；已扫描 ${scannedCandidates}/${budgets.scanned} 个候选并临时下载验证 ${downloadedCandidates}/${budgets.downloaded} 张，跳过缺失方向并继续`);
       }
     }
   } finally {
     await detailPage.close().catch(() => {});
+    await cleanupCandidateTempFiles(referencesDir);
   }
 
-  const selected = selectReferencesForPlans(results, plans);
-  if (!selected) {
+  const selected = selectAvailableReferencesForPlans(results, plans);
+  if (selected.length < count) {
     await screenshotFailure(page, path.join(runDir, "huaban-incomplete.png"));
-    throw new Error(`未按类型配额采集满 ${count} 张不重复参考图`);
+    console.warn(`本轮获得 ${selected.length}/${count} 张不重复参考图；缺失方向将在 manifest 中记录后跳过`);
   }
 
   const csvRows = results.map((item, index) => [

@@ -17,7 +17,13 @@
   "collection": {
     "referenceCount": 10,
     "minReferenceWidthPx": 720,
-    "perKeywordLimit": 2,
+    "maxScannedCandidatesPerDirection": 30,
+    "maxCandidatesPerKeyword": 3,
+    "maxDownloadedCandidatesPerDirection": 8,
+    "visualReviewBatchSize": 4,
+    "visualReviewTimeoutMinutes": 2,
+    "visualReviewMaxAttempts": 2,
+    "visualReviewMinimumScore": 75,
     "maxSearchScrolls": 20,
     "searchPlans": [
       {
@@ -33,7 +39,7 @@
       {
         "type": "float",
         "count": 2,
-        "keywords": ["金融 活动浮窗", "借款 福利浮窗", "贷款 红包浮窗", "理财 活动浮标", "金融 福利入口", "金融 悬浮入口", "借贷 活动挂件", "金融 运营浮标"]
+        "keywords": ["金融 活动浮窗", "借款 福利浮窗", "贷款 红包浮窗", "理财 活动浮标", "金融 福利入口", "金融 悬浮入口", "借贷 活动挂件", "金融 运营浮标", "金融 运营贴片", "借款 活动贴片"]
       }
     ]
   },

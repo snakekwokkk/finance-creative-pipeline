@@ -23,8 +23,11 @@ import {
   directionProcessingOrder,
   directionChatTitle,
   previewPrompt,
+  parseReferenceAudit,
   projectBaseUrl,
   readyDirectionsForFigma,
+  referenceAuditChatTitle,
+  referenceAuditPrompt,
   recordDirectionFailure,
   rejectedReferenceSourceSet,
   referenceAnalysisReceiptValid,
@@ -130,6 +133,28 @@ test("direction chats use type-local numbering instead of global direction numbe
   assert.throws(() => directionChatTitle("unknown", 0), /不支持的方向类型/);
 });
 
+test("reference content audits live in dated-project chats and rely on image content", () => {
+  assert.equal(referenceAuditChatTitle("popup"), "采集筛选-弹窗");
+  assert.equal(referenceAuditChatTitle("banner"), "采集筛选-Banner");
+  const candidates = [
+    { pinId: "p1", file: "/tmp/candidate-p1.webp", title: "IMG_4953", searchKeyword: "借贷 活动弹窗", width: 900, height: 1600 },
+    { pinId: "p2", file: "/tmp/candidate-p2.webp", title: "促销元素", searchKeyword: "借贷 活动弹窗", width: 800, height: 800 }
+  ];
+  const prompt = referenceAuditPrompt("popup", candidates);
+  assert.match(prompt, /最终结论必须以图片实际内容为主/);
+  assert.match(prompt, /拒绝背景、按钮、优惠券、金币、图标、装饰元素/);
+  assert.match(prompt, /candidate-p1\.webp/);
+
+  const parsed = parseReferenceAudit(`REFERENCE_AUDIT_START
+{"candidates":[{"pinId":"p1","filename":"candidate-p1.webp","typeMatch":true,"completeDesign":true,"financeRelevant":true,"structureValid":true,"usableReference":true,"score":88,"reasons":["完整金融弹窗"]},{"pinId":"p2","filename":"candidate-p2.webp","typeMatch":false,"completeDesign":false,"financeRelevant":false,"structureValid":false,"usableReference":false,"score":20,"reasons":["只是原子元素"]}]}
+REFERENCE_AUDIT_END`, candidates);
+  assert.equal(parsed.candidates[0].accepted, true);
+  assert.equal(parsed.candidates[1].accepted, false);
+  assert.throws(() => parseReferenceAudit(`REFERENCE_AUDIT_START
+{"candidates":[{"pinId":"p1","score":90}]}
+REFERENCE_AUDIT_END`, candidates), /漏掉候选/);
+});
+
 test("popup prompts generate and decompose only the popup body", () => {
   const specPrompt = analysisPrompt(1, "popup");
   const imagePrompt = previewPrompt({ imagePrompt: "红色金融弹窗" }, 1002, 1335, "popup");
@@ -175,6 +200,7 @@ test("each direction receives one reference from its matching creative type", ()
   assert.equal(selectDirectionReference(references, "banner", 0).pinId, "b1");
   assert.equal(selectDirectionReference(references, "banner", 1).pinId, "b2");
   assert.equal(selectDirectionReference(references, "float", 0).pinId, "f1");
+  assert.throws(() => selectDirectionReference(references, "float", 2), /缺少独立参考图/);
 });
 
 test("ready directions using newly rejected references are selectively invalidated", () => {
@@ -189,6 +215,9 @@ test("ready directions using newly rejected references are selectively invalidat
     index: 9,
     sourceUrls: ["https://huaban.com/pins/1234567890"]
   }, rejectedSources), false);
+  assert.equal(rejectedReferenceSourceSet({
+    rejections: [{ sourceUrl: "https://huaban.com/pins/6654351906", active: false }]
+  }).size, 0);
 });
 
 test("human authentication blockers stop immediately", () => {

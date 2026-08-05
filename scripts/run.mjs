@@ -3,7 +3,16 @@ import path from "node:path";
 import { appSupportDir, ensureConfig, localDate, localTime } from "./lib/config.mjs";
 import { createSingleLaunchBrowser, launchPersistentBrowser, findOrOpenPage, screenshotFailure } from "./lib/browser.mjs";
 import { buildSearchPlansForTypes, collectReferences } from "./lib/collector.mjs";
-import { activeDirectionFailures, generateDirections, readyDirectionsForFigma, workflowAbortedError, workflowAbortRequested } from "./lib/chatgpt-web.mjs";
+import {
+  activeDirectionFailures,
+  ensureChatGptLoggedIn,
+  ensureDailyProject,
+  generateDirections,
+  readyDirectionsForFigma,
+  reviewReferenceCandidates,
+  workflowAbortedError,
+  workflowAbortRequested
+} from "./lib/chatgpt-web.mjs";
 import { appendError, ensureRun, readJson, updateRun, writeJsonAtomic } from "./lib/state.mjs";
 import { notify } from "./lib/notify.mjs";
 import { acquireWorkflowLock } from "./lib/workflow-lock.mjs";
@@ -11,6 +20,7 @@ import { acquireWorkflowLock } from "./lib/workflow-lock.mjs";
 const testMode = process.argv.includes("--test");
 const scheduledMode = process.argv.includes("--scheduled");
 const visibleMode = process.argv.includes("--visible");
+const collectionOnly = process.argv.includes("--collection-only");
 const typesIndex = process.argv.indexOf("--types");
 const requestedTypes = typesIndex >= 0
   ? String(process.argv[typesIndex + 1] || "").split(",").map((item) => item.trim().toLowerCase()).filter(Boolean)
@@ -19,11 +29,16 @@ const allowedTypes = new Set(["popup", "banner", "float"]);
 if (requestedTypes.some((type) => !allowedTypes.has(type))) {
   throw new Error("--types 只支持 popup、banner、float，并使用逗号分隔");
 }
+if (collectionOnly && requestedTypes.length === 0) {
+  throw new Error("--collection-only 必须与 --types 一起使用，避免误停正式流水线");
+}
 const validationMode = requestedTypes.length > 0;
 const config = await ensureConfig();
 await fs.mkdir(config.outputRoot, { recursive: true });
 const date = localDate(config.timezone);
-const runName = validationMode ? `${date}-validation-${requestedTypes.join("-")}` : date;
+const runName = validationMode
+  ? `${date}-validation-${requestedTypes.join("-")}${collectionOnly ? "-collection" : ""}`
+  : date;
 const runDir = path.join(config.outputRoot, runName);
 const runFile = path.join(runDir, "run.json");
 await fs.mkdir(runDir, { recursive: true });
@@ -59,7 +74,7 @@ try {
   workflowLock = await acquireWorkflowLock(path.join(appSupportDir, "workflow.lock"), {
     runName,
     runDir,
-    mode: validationMode ? "validation" : testMode ? "test" : scheduledMode ? "scheduled" : "normal"
+    mode: collectionOnly ? "collection-only" : validationMode ? "validation" : testMode ? "test" : scheduledMode ? "scheduled" : "normal"
   });
 } catch (error) {
   await notify("金融运营素材流水线未启动", error.message);
@@ -96,10 +111,51 @@ try {
   };
   console.log(JSON.stringify({ event: "browser_session_started", ...browserSession }));
 
-  await updateRun(runFile, { status: "running", browserSession, stages: { collection: "running", generation: "pending", decomposition: "pending", figma: "pending" } });
-  const references = await collectReferences({ context, page: huaban, detailPage: huabanDetail, config: runConfig, runDir, date, count: referenceCount });
-  await updateRun(runFile, { status: "running", referenceCount: references.length, stages: { collection: "complete", generation: "running", decomposition: "pending", figma: "pending" } });
-  const manifest = await generateDirections({
+  await updateRun(runFile, { status: "running", blocker: null, browserSession, stages: { collection: "running", generation: "pending", decomposition: "pending", figma: "pending" } });
+  await ensureChatGptLoggedIn(chatgpt);
+  const dailyProject = await ensureDailyProject(chatgpt, runConfig, date);
+  const chatgptProject = { ...dailyProject, resolvedAt: new Date().toISOString() };
+  await updateRun(runFile, { chatgptProject });
+  const references = await collectReferences({
+    context,
+    page: huaban,
+    detailPage: huabanDetail,
+    config: runConfig,
+    runDir,
+    date,
+    count: referenceCount,
+    visualReviewer: ({ type, candidates }) => reviewReferenceCandidates({
+      page: chatgpt,
+      project: dailyProject,
+      config: runConfig,
+      runDir,
+      type,
+      candidates
+    })
+  });
+  if (collectionOnly) {
+    const collectionSucceeded = references.length >= referenceCount;
+    const status = collectionSucceeded ? "collection_complete" : "collection_incomplete";
+    await updateRun(runFile, {
+      status,
+      blocker: null,
+      referenceCount: references.length,
+      chatgptProject,
+      stages: {
+        collection: collectionSucceeded ? "complete" : "partial",
+        generation: "pending",
+        decomposition: "pending",
+        figma: "pending"
+      }
+    });
+    const message = collectionSucceeded
+      ? `参考图采集完成：${references.length}/${referenceCount}，已按要求停止后续流程。`
+      : `参考图仅采集到 ${references.length}/${referenceCount}，未进入生图、拆图或 Figma。`;
+    await notify("金融运营素材采集测试", message);
+    console.log(JSON.stringify({ status, runDir, referenceCount: references.length, requestedCount: referenceCount }));
+  } else {
+    await updateRun(runFile, { status: "running", referenceCount: references.length, stages: { collection: "complete", generation: "running", decomposition: "pending", figma: "pending" } });
+    const manifest = await generateDirections({
     page: chatgpt,
     config: runConfig,
     runDir,
@@ -107,14 +163,15 @@ try {
     count: directionCount,
     directionTypes: validationMode ? requestedTypes : null,
     runDate: date,
+    initialProject: dailyProject,
     onProjectReady: (chatgptProject) => updateRun(runFile, { chatgptProject }),
     shouldStop: () => Boolean(stopSignal)
   });
-  const readyDirections = await readyDirectionsForFigma(manifest);
-  const readyCount = readyDirections.length;
-  const failures = activeDirectionFailures(manifest);
-  const manifestFile = path.join(runDir, "figma-manifest.json");
-  if (failures.length && readyCount > 0) {
+    const readyDirections = await readyDirectionsForFigma(manifest);
+    const readyCount = readyDirections.length;
+    const failures = activeDirectionFailures(manifest);
+    const manifestFile = path.join(runDir, "figma-manifest.json");
+    if (failures.length && readyCount > 0) {
     await updateRun(runFile, {
       status: "awaiting_figma",
       directionCount: readyCount,
@@ -125,7 +182,7 @@ try {
     });
     await notify("金融运营素材流水线等待写入 Figma", `${readyCount}/${directionCount} 套可用，${failures.length} 套失败已保留；继续同步可用方向。`);
     console.log(JSON.stringify({ status: "awaiting_figma", partial: true, runDir, manifest: manifestFile, readyCount, failures }));
-  } else if (!failures.length) {
+    } else if (!failures.length) {
     await updateRun(runFile, {
       status: "awaiting_figma",
       directionCount: readyCount,
@@ -136,7 +193,7 @@ try {
     });
     await notify("金融运营素材流水线", `${validationMode ? "验证素材" : "本地素材和生图"}已完成，等待写入 Figma：${runDir}`);
     console.log(JSON.stringify({ status: "awaiting_figma", runDir, manifest: manifestFile }));
-  } else {
+    } else {
     await updateRun(runFile, {
       status: "blocked",
       directionCount: 0,
@@ -147,6 +204,7 @@ try {
     });
     await notify("金融运营素材流水线无可同步方向", `${failures.length} 套均失败，ChatGPT 阶段已结束，本次不写入 Figma。`);
     console.log(JSON.stringify({ status: "partial", runDir, manifest: manifestFile, readyCount: 0, failures }));
+    }
   }
 } catch (error) {
   if (workflowAbortRequested(error, () => Boolean(stopSignal))) {
