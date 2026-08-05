@@ -26,6 +26,7 @@ import {
   projectBaseUrl,
   readyDirectionsForFigma,
   recordDirectionFailure,
+  rejectedReferenceSourceSet,
   referenceAnalysisReceiptValid,
   referenceUploadRequired,
   requiresUserAction,
@@ -35,6 +36,7 @@ import {
   separateAssetCorrectionPrompt,
   separateAssetPrompt,
   selectDirectionReference,
+  directionUsesRejectedReference,
   transparentAssetAttemptLimit,
   workflowAbortedError,
   workflowAbortRequested
@@ -173,6 +175,20 @@ test("each direction receives one reference from its matching creative type", ()
   assert.equal(selectDirectionReference(references, "banner", 0).pinId, "b1");
   assert.equal(selectDirectionReference(references, "banner", 1).pinId, "b2");
   assert.equal(selectDirectionReference(references, "float", 0).pinId, "f1");
+});
+
+test("ready directions using newly rejected references are selectively invalidated", () => {
+  const rejectedSources = rejectedReferenceSourceSet({
+    rejections: [{ sourceUrl: "https://huaban.com/pins/6654351906?searchWord=old" }]
+  });
+  assert.equal(directionUsesRejectedReference({
+    index: 10,
+    sourceUrls: ["https://huaban.com/pins/6654351906?searchWord=different-query"]
+  }, rejectedSources), true);
+  assert.equal(directionUsesRejectedReference({
+    index: 9,
+    sourceUrls: ["https://huaban.com/pins/1234567890"]
+  }, rejectedSources), false);
 });
 
 test("human authentication blockers stop immediately", () => {

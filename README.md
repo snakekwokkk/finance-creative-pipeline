@@ -43,7 +43,9 @@ Finance Creative Pipeline 是一个面向中国互联网金融运营素材的 Co
 - 项目内聊天会显式命名为 `弹窗1` 至 `弹窗6`、`Banner1` 至 `Banner2`、`浮窗1` 至 `浮窗2`；编号在各素材类型内独立计算，验证运行中的每个类型从 1 开始。
 - 参考图使用 ChatGPT 图片专用上传控件；只有该方向 1 张附件的文件名、缩略图和发送状态全部验证通过后才发送分析提示词。若 ChatGPT 回复未收到图片，流水线会清理草稿并重新上传，不会继续无图生图。
 - 流水线从 `run.json` 和 `figma-manifest.json` 恢复，避免重复采集、重复生成和重复创建 Figma 日期分区。
-- 参考图按类型采集：弹窗、Banner、浮窗分别使用匹配的关键词池和数量配额，不混用搜索词。Banner 词库使用 `金融banner`、`理财banner`、`投资理财banner` 等金融垂类词，优先寻找结构简洁的横向设计；浮窗词库使用 `浮窗`、`小浮窗`、`悬浮窗素材` 等形态词，并排除明显的完整手机页面。
+- 参考图按类型采集：弹窗、Banner、浮窗分别使用匹配的关键词池和数量配额，不混用搜索词。Banner 词库使用 `金融banner`、`理财banner`、`投资理财banner` 等金融垂类词，优先寻找结构简洁的横向设计；浮窗使用 `金融 活动浮窗`、`借款 福利浮窗`、`金融 福利入口` 等金融运营词，并通过标题语义与透明独立主体结构排除纯背景、边框、普通按钮、文字贴纸和完整页面。
+- 浮窗不使用 720px 最低宽度或高宽比门槛，小尺寸素材可以通过；内容必须是完整、独立的运营浮窗、浮标、活动入口或挂件。被拒绝的 Pin 会继续向下补采，并写入根目录及当天目录的 `reference-rejections.json`。
+- 弹窗和 Banner 继续使用默认 720px 最低宽度门槛，并增加标题与视觉结构验收。弹窗需是完整弹窗/金融运营场景，具有主体与遮罩或页面背景层级；Banner 需同时具备金融业务与横向营销成品语义，且宽高比至少 1.5。其他行业、整页活动图、背景、按钮、贴纸、单个元素和模板会被拒绝并继续补采。
 - `reference-history.json` 长期记录已采集 Pin 和图片指纹；后续运行会跳过历史 Pin 和相同图片并继续滚动检索，不会误删仅仅版式相似的素材。
 - Figma 左侧始终是完整预览，右侧必须是可见的可编辑重建，禁止左右两边显示同一张扁平图。
 
@@ -124,10 +126,9 @@ codex plugin add finance-creative-pipeline@<marketplace-name>
 | `figma.fileKey` | 目标 Figma 文件 key |
 | `figma.pageId` | 目标 Figma 页面 ID |
 | `collection.referenceCount` | 正式运行采集的参考图数量 |
-| `collection.minReferenceWidthPx` | 详情页参考图的最低像素宽度，默认 720 |
+| `collection.minReferenceWidthPx` | 弹窗和 Banner 详情图的最低像素宽度，默认 720；浮窗不使用此门槛 |
 | `collection.perKeywordLimit` | 单个搜索词最多接受的参考图数量 |
 | `collection.maxSearchScrolls` | 为寻找未采集 Pin 执行的最大滚动次数 |
-| `collection.maxFloatHeightToWidthRatio` | 浮窗参考图允许的最大高宽比，默认 2；用于排除完整手机页面 |
 | `collection.searchPlans` | 弹窗、Banner、浮窗各自的配额和搜索词列表 |
 | `generation.directionCount` | 原创方向数量 |
 | `generation.analysisTimeoutMinutes` | 第 6 步参考分析单次等待上限，默认 5 分钟 |
@@ -175,6 +176,7 @@ codex plugin add finance-creative-pipeline@<marketplace-name>
 YYYY-MM-DD/
 ├── run.json
 ├── figma-manifest.json
+├── reference-rejections.json
 ├── references/
 └── directions/
     └── 01/
@@ -186,7 +188,7 @@ YYYY-MM-DD/
             └── NN-layer-id.png
 ```
 
-输出根目录还会维护 `reference-history.json`，长期保存已接受的 Pin ID、aHash、来源、尺寸和采集日期。每日运行会先读取该台账，再向下滚动寻找未采集内容。
+输出根目录还会维护 `reference-history.json` 和 `reference-rejections.json`：前者长期保存已接受的 Pin ID、aHash、来源、尺寸和采集日期；后者保存因标题或视觉结构不符合类型而拒绝的 Pin 及具体原因。每日运行会跳过两类历史记录并继续向下检索。恢复旧运行时，若某个 `ready` 方向引用的素材在重新审计后进入当天拒绝台账，只让该方向失效并使用新合格参考重新生成；其他完整方向继续复用。
 
 - `preview.png`：完整、扁平化的最终预览。
 - `spec.json`：方向构图、配色、组件和文案。
@@ -269,7 +271,9 @@ A normal run collects 10 references and generates 10 original directions: six po
 - Project chats are explicitly renamed with type-local numbering: `弹窗1`–`弹窗6`, `Banner1`–`Banner2`, and `浮窗1`–`浮窗2`. Isolated validation runs start each included type at 1 instead of using the global direction index.
 - Reference images use ChatGPT's image-specific upload input. The analysis prompt is sent only after every expected filename, image thumbnail, and send-ready state is verified. If ChatGPT reports missing images, the composer is cleared and all references are uploaded again instead of continuing without visual references.
 - Resume from `run.json` and `figma-manifest.json` to avoid duplicate collection, generation, or dated Figma sections.
-- Collect popup, Banner, and floating-window references from separate type-matched keyword pools and quotas. Banner queries use finance-specific terms such as `金融banner`, `理财banner`, and `投资理财banner`, favoring simple horizontal compositions. Floating references use form-specific terms such as `浮窗`, `小浮窗`, and `悬浮窗素材`, while obvious full phone screens are rejected.
+- Collect popup, Banner, and floating-window references from separate type-matched keyword pools and quotas. Banner queries use finance-specific terms such as `金融banner`, `理财banner`, and `投资理财banner`, favoring simple horizontal compositions. Floating references use finance-operations queries such as `金融 活动浮窗`, `借款 福利浮窗`, and `金融 福利入口`, then apply title semantics and transparent standalone-subject checks to reject backgrounds, borders, plain buttons, text stickers, and full pages.
+- Floating references do not use the 720 px minimum-width or aspect-ratio gates, so genuinely small floating creatives remain eligible. Rejected Pins are replaced by deeper search results and recorded with reasons in root and daily `reference-rejections.json` ledgers.
+- Popup and Banner references retain the configured 720 px minimum-width gate and additionally pass title and visual-structure audits. Popups must present a complete modal with a distinct surrounding layer; Banners must contain finance plus finished horizontal-marketing semantics and use an aspect ratio of at least 1.5. Full pages, unrelated industries, backgrounds, atomic buttons/elements, stickers, and templates are rejected and replaced.
 - Keep accepted Pin IDs and image fingerprints in `reference-history.json`; later runs skip historical Pins and identical images and continue scrolling, without rejecting merely similar layouts.
 - The Figma preview stays on the left. The right side must visibly render editable layers and must never duplicate the same flattened image.
 
@@ -350,10 +354,9 @@ User configuration lives outside the repository and should never be committed:
 | `figma.fileKey` | Target Figma file key |
 | `figma.pageId` | Target Figma page ID |
 | `collection.referenceCount` | Number of references in a normal run |
-| `collection.minReferenceWidthPx` | Minimum detail-image width in pixels; defaults to 720 |
+| `collection.minReferenceWidthPx` | Minimum detail-image width for popup and Banner references; defaults to 720 and does not apply to floats |
 | `collection.perKeywordLimit` | Maximum accepted references from one search query |
 | `collection.maxSearchScrolls` | Maximum scroll attempts used to find unseen Pins |
-| `collection.maxFloatHeightToWidthRatio` | Maximum float-reference height-to-width ratio; defaults to 2 to reject full phone screens |
 | `collection.searchPlans` | Type-specific quotas and queries for popup, Banner, and floating references |
 | `generation.directionCount` | Number of original directions |
 | `generation.analysisTimeoutMinutes` | Maximum wait per step 6 reference-analysis attempt; defaults to 5 minutes |
@@ -403,6 +406,7 @@ Steps 6 through 9 each have independent two-attempt budgets with a five-minute l
 YYYY-MM-DD/
 ├── run.json
 ├── figma-manifest.json
+├── reference-rejections.json
 ├── references/
 └── directions/
     └── 01/
@@ -419,6 +423,8 @@ YYYY-MM-DD/
 - `layers.json`: semantic layer plan produced by ChatGPT Web.
 - `decomposition-report.json`: per-asset Alpha and boundary metrics, warnings, and limitations.
 - `layers/*.png`: independently generated transparent assets accepted by the quality gate.
+
+The output root also keeps `reference-history.json` for accepted references and `reference-rejections.json` for content-rejected Pins and their audit reasons. Both ledgers are used to avoid repeating unsuitable results. On resume, a ready direction whose source was newly rejected by the daily re-audit is selectively regenerated with its replacement reference; unrelated complete directions remain reusable.
 
 ### Figma Delivery Contract
 

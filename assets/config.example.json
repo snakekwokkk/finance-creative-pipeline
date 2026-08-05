@@ -19,7 +19,6 @@
     "minReferenceWidthPx": 720,
     "perKeywordLimit": 2,
     "maxSearchScrolls": 20,
-    "maxFloatHeightToWidthRatio": 2,
     "searchPlans": [
       {
         "type": "popup",
@@ -34,7 +33,7 @@
       {
         "type": "float",
         "count": 2,
-        "keywords": ["浮窗", "小浮窗", "悬浮窗素材", "活动浮窗", "红包浮窗", "福利浮窗", "悬浮按钮", "活动浮标"]
+        "keywords": ["金融 活动浮窗", "借款 福利浮窗", "贷款 红包浮窗", "理财 活动浮标", "金融 福利入口", "金融 悬浮入口", "借贷 活动挂件", "金融 运营浮标"]
       }
     ]
   },

@@ -682,6 +682,27 @@ export function selectDirectionReference(references, type, typeIndex) {
   return typed[typeIndex % typed.length];
 }
 
+function referenceSourceKeys(sourceUrl) {
+  if (!sourceUrl) return [];
+  const keys = [String(sourceUrl)];
+  try {
+    const url = new URL(sourceUrl);
+    const pinId = url.pathname.match(/\/pins\/(\d+)/)?.[1];
+    if (pinId) keys.push(`huaban-pin:${pinId}`);
+  } catch {}
+  return keys;
+}
+
+export function rejectedReferenceSourceSet(rejectionLedger) {
+  return new Set((rejectionLedger?.rejections || [])
+    .flatMap((item) => referenceSourceKeys(item.sourceUrl)));
+}
+
+export function directionUsesRejectedReference(direction, rejectedSources) {
+  return (direction?.sourceUrls || []).some((sourceUrl) =>
+    referenceSourceKeys(sourceUrl).some((key) => rejectedSources.has(key)));
+}
+
 export function recordDirectionFailure(manifest, failure) {
   manifest.failures = (manifest.failures || [])
     .filter((item) => item.index !== failure.index)
@@ -838,8 +859,9 @@ export async function decomposePreview(
   const layersFile = path.join(directionDir, "layers.json");
   const outputDir = path.join(directionDir, "layers");
   const reportFile = path.join(outputDir, "decomposition-report.json");
-  const cached = await readJson(layersFile);
-  const cachedReport = await readJson(reportFile);
+  const force = limits.force === true;
+  const cached = force ? null : await readJson(layersFile);
+  const cachedReport = force ? null : await readJson(reportFile);
   if (cached?.schemaVersion >= 4 && cached?.layers?.length && await reportAssetsReady(cachedReport)) return cached;
   const decompositionTimeout = config.generation.decompositionTimeoutMinutes || config.generation.analysisTimeoutMinutes;
   const assetConfig = config.transparentAssets || {};
@@ -910,7 +932,7 @@ export async function decomposePreview(
   let assetFailure = null;
   for (const layer of layers.layers.filter(isRasterAsset).sort((left, right) => left.assetIndex - right.assetIndex)) {
     let result = assetResults.get(layer.id)
-      || await recoverAcceptedAsset({ layer, outputDir, thresholds: assetConfig });
+      || (!force && await recoverAcceptedAsset({ layer, outputDir, thresholds: assetConfig }));
     if (result?.status === "accepted") {
       assetResults.set(layer.id, result);
       continue;
@@ -1000,6 +1022,16 @@ export async function generateDirections({
   const manifestFile = path.join(runDir, "figma-manifest.json");
   const manifest = await readJson(manifestFile, { date: runDate || path.basename(runDir), figma: config.figma, directions: [] });
   manifest.directionChats ||= {};
+  const rejectionLedger = await readJson(path.join(runDir, "reference-rejections.json"), { rejections: [] });
+  const rejectedSources = rejectedReferenceSourceSet(rejectionLedger);
+  const invalidatedDirections = new Set((manifest.directions || [])
+    .filter((direction) => direction.status === "ready" && directionUsesRejectedReference(direction, rejectedSources))
+    .map((direction) => direction.index));
+  if (invalidatedDirections.size) {
+    manifest.directions = manifest.directions.filter((direction) => !invalidatedDirections.has(direction.index));
+    await writeJsonAtomic(manifestFile, manifest);
+    console.warn(`以下已完成方向引用了不合格参考图，将仅重做这些方向：${[...invalidatedDirections].join("、")}`);
+  }
   const historicalFailures = new Set(activeDirectionFailures(manifest).map((item) => item.index));
   let project = null;
   if (manifest.chatgptProject?.url) {
@@ -1037,7 +1069,8 @@ export async function generateDirections({
       await writeJsonAtomic(manifestFile, manifest);
       await onProjectReady(manifest.chatgptProject);
     }
-    let cachedSpec = await readJson(specFile);
+    const forceRegeneration = invalidatedDirections.has(index);
+    let cachedSpec = forceRegeneration ? null : await readJson(specFile);
     const type = directionTypes?.[zero] || (index <= 6 ? "popup" : index <= 8 ? "banner" : "float");
     const typeIndex = directionTypes
       ? directionTypes.slice(0, zero).filter((candidate) => candidate === type).length
@@ -1137,7 +1170,7 @@ export async function generateDirections({
         });
       }
 
-      if (!(await validImageFile(previewFile))) {
+      if (forceRegeneration || !(await validImageFile(previewFile))) {
         const previewAttempts = directionAttemptLimit(config, historicalFailure);
         await runDirectionStageAttempts({
           attempts: previewAttempts,
@@ -1181,7 +1214,8 @@ export async function generateDirections({
         recoverDecompositionConversation,
         {
           decompositionAttempts: decompositionAttemptLimit(config, historicalFailure),
-          transparentAssetAttempts: transparentAssetAttemptLimit(config, historicalFailure)
+          transparentAssetAttempts: transparentAssetAttemptLimit(config, historicalFailure),
+          force: forceRegeneration
         }
       );
       const chatUrl = await rememberConversation();

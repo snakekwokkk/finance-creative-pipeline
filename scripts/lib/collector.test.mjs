@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildSearchPlans, buildSearchPlansForTypes, isReferenceShapeAllowed, isSameImage, selectReferencesForPlans } from "./collector.mjs";
+import sharp from "sharp";
+import {
+  assessBannerReferenceVisual,
+  assessFloatReferenceVisual,
+  assessPopupReferenceVisual,
+  assessReferenceTitle,
+  buildSearchPlans,
+  buildSearchPlansForTypes,
+  isSameImage,
+  minimumReferenceWidth,
+  selectReferencesForPlans
+} from "./collector.mjs";
 
 test("default search plan preserves type quotas", () => {
   const plans = buildSearchPlans({}, 10, "2026-08-04");
@@ -14,9 +25,8 @@ test("default search plan preserves type quotas", () => {
   assert.ok(plans[1].keywords.every((keyword) => /金融|理财|投资|基金|证券/.test(keyword)));
   assert.ok(plans[1].keywords.includes("金融banner"));
   assert.ok(plans[1].keywords.every((keyword) => !/弹窗|浮窗|悬浮|浮标/.test(keyword)));
-  assert.ok(plans[2].keywords.every((keyword) => /浮窗|悬浮|浮标/.test(keyword)));
-  assert.ok(plans[2].keywords.includes("浮窗"));
-  assert.ok(plans[2].keywords.every((keyword) => !/App|界面|页面|运营/i.test(keyword)));
+  assert.ok(plans[2].keywords.every((keyword) => /浮窗|悬浮|浮标|入口|挂件/.test(keyword)));
+  assert.ok(plans[2].keywords.every((keyword) => /金融|借款|贷款|理财|借贷/.test(keyword)));
 });
 
 test("small test runs use only popup references", () => {
@@ -38,9 +48,8 @@ test("three-type validation uses one reference from each matching keyword pool",
   assert.ok(plans[1].keywords.every((keyword) => /金融|理财|投资|基金|证券/.test(keyword)));
   assert.ok(plans[1].keywords.includes("金融banner"));
   assert.ok(plans[1].keywords.every((keyword) => !/弹窗|浮窗|悬浮|浮标/.test(keyword)));
-  assert.ok(plans[2].keywords.every((keyword) => /浮窗|悬浮|浮标/.test(keyword)));
-  assert.ok(plans[2].keywords.includes("浮窗"));
-  assert.ok(plans[2].keywords.every((keyword) => !/App|界面|页面|运营/i.test(keyword)));
+  assert.ok(plans[2].keywords.every((keyword) => /浮窗|悬浮|浮标|入口|挂件/.test(keyword)));
+  assert.ok(plans[2].keywords.every((keyword) => /金融|借款|贷款|理财|借贷/.test(keyword)));
 });
 
 test("cached references are selected by type quota instead of taking the first ten", () => {
@@ -56,12 +65,65 @@ test("cached references are selected by type quota instead of taking the first t
   ]);
 });
 
-test("float references reject full-height phone screens", () => {
-  assert.equal(isReferenceShapeAllowed("float", 1170, 2532), false);
-  assert.equal(isReferenceShapeAllowed("float", 828, 1792), false);
-  assert.equal(isReferenceShapeAllowed("float", 1000, 1000), true);
-  assert.equal(isReferenceShapeAllowed("float", 800, 1400), true);
-  assert.equal(isReferenceShapeAllowed("popup", 828, 1792), true);
+test("float references do not inherit the normal minimum-width gate", () => {
+  assert.equal(minimumReferenceWidth("float", 720), 1);
+  assert.equal(minimumReferenceWidth("popup", 720), 720);
+  assert.equal(minimumReferenceWidth("banner", 720), 720);
+});
+
+test("float titles require a complete finance operations entry and reject obvious unrelated assets", () => {
+  assert.equal(assessReferenceTitle("float", "金融新客福利活动浮窗").accepted, true);
+  assert.equal(assessReferenceTitle("float", "借款红包活动入口").accepted, true);
+  assert.equal(assessReferenceTitle("float", "商品零售按钮文字贴纸素材").accepted, false);
+  assert.equal(assessReferenceTitle("float", "常规背景系列蓝白色渐变弥散背景").accepted, false);
+  assert.equal(assessReferenceTitle("float", "蓝紫色渐变长条形立体按钮元素").accepted, false);
+  assert.equal(assessReferenceTitle("float", "金融活动浮窗按钮素材").accepted, false);
+  assert.equal(assessReferenceTitle("float", "金融活动贴片文字贴纸").accepted, false);
+  assert.equal(assessReferenceTitle("float", "金融 App 完整页面界面").accepted, false);
+});
+
+test("popup titles reject generic pins and atomic elements while keeping complete finance popups", () => {
+  assert.equal(assessReferenceTitle("popup", "借款红包活动弹窗").accepted, true);
+  assert.equal(assessReferenceTitle("popup", "一单回本@1x").accepted, true);
+  assert.equal(assessReferenceTitle("popup", "pin-6987548153").accepted, false);
+  assert.equal(assessReferenceTitle("popup", "促销系列拟物风膨胀优惠券元素").accepted, false);
+});
+
+test("banner titles require finance plus finished horizontal marketing semantics", () => {
+  assert.equal(assessReferenceTitle("banner", "金融保险产品营销商务2.5D首图").accepted, true);
+  assert.equal(assessReferenceTitle("banner", "基金证券直播宣传课程封面横版banner").accepted, true);
+  assert.equal(assessReferenceTitle("banner", "教育培训资格认证横板课程封面").accepted, false);
+  assert.equal(assessReferenceTitle("banner", "金融科技渐变背景素材").accepted, false);
+});
+
+test("popup visual audit requires a modal subject over a distinct surrounding layer", async () => {
+  const valid = await sharp({ create: { width: 900, height: 1600, channels: 3, background: "#303030" } })
+    .composite([{ input: { create: { width: 700, height: 900, channels: 3, background: "#f8f8f8" } }, left: 100, top: 350 }])
+    .webp()
+    .toBuffer();
+  const fullPage = await sharp({ create: { width: 900, height: 1600, channels: 3, background: "#f4c5b8" } }).webp().toBuffer();
+  assert.equal((await assessPopupReferenceVisual(valid)).accepted, true);
+  assert.equal((await assessPopupReferenceVisual(fullPage)).accepted, false);
+});
+
+test("banner visual audit keeps horizontal width semantics", async () => {
+  const horizontal = await sharp({ create: { width: 1200, height: 500, channels: 3, background: "#ffffff" } }).webp().toBuffer();
+  const square = await sharp({ create: { width: 800, height: 800, channels: 3, background: "#ffffff" } }).webp().toBuffer();
+  assert.equal((await assessBannerReferenceVisual(horizontal)).accepted, true);
+  assert.equal((await assessBannerReferenceVisual(square)).accepted, false);
+});
+
+test("float visual audit accepts small transparent subjects and rejects opaque backgrounds", async () => {
+  const smallFloat = await sharp({
+    create: { width: 120, height: 120, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } }
+  }).composite([{ input: await sharp({
+    create: { width: 70, height: 70, channels: 4, background: { r: 255, g: 60, b: 80, alpha: 1 } }
+  }).png().toBuffer(), left: 25, top: 25 }]).png().toBuffer();
+  const background = await sharp({
+    create: { width: 300, height: 500, channels: 3, background: { r: 180, g: 210, b: 255 } }
+  }).jpeg().toBuffer();
+  assert.equal((await assessFloatReferenceVisual(smallFloat)).accepted, true);
+  assert.equal((await assessFloatReferenceVisual(background)).accepted, false);
 });
 
 test("duplicate detection rejects only the same image", () => {

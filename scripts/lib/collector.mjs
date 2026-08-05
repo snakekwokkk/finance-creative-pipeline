@@ -7,6 +7,17 @@ import { screenshotFailure } from "./browser.mjs";
 
 const CSV_HEADER = "index,pin_id,reference_type,title,source_url,list_image_url,image_url,width,height,file_size,search_keyword,collected_at,sha256,ahash\n";
 const HISTORY_FILE = "reference-history.json";
+const REJECTIONS_FILE = "reference-rejections.json";
+const POPUP_FORM_PATTERN = /弹窗|弹框|模态|对话框|浮层|遮罩/i;
+const POPUP_CONTEXT_PATTERN = /金融|借款|贷款|助贷|理财|投资|基金|证券|保险|还款|额度|免息|红包|福利|优惠|优惠券|新客|会员|任务|奖励|活动|营销|回本|中奖|膨胀|省钱/i;
+const POPUP_ATOMIC_PATTERN = /背景|底图|纹理|壁纸|边框|框架|按钮素材|普通按钮|贴纸素材|文字素材|字体|字效|图标素材|icon|logo|banner|横幅|海报|主视觉|促销元素|优惠券元素|3d.*元素/i;
+const POPUP_PAGE_PATTERN = /完整页面|页面设计|界面设计|首页|详情页|落地页|启动页/i;
+const BANNER_FORM_PATTERN = /banner|横幅|横版|横板|首图|头图|广告|焦点图|宣传|推广|营销|活动/i;
+const BANNER_CONTEXT_PATTERN = /金融|借款|贷款|助贷|理财|投资|基金|证券|保险|财富|资产|权益|收益|行情|股票|债券|期货|黄金|新客|会员|红包|福利/i;
+const BANNER_BLOCKED_PATTERN = /教育|培训|教资|餐饮|美食|地产|房产|家装|医美|美容|旅游|婚庆|招聘|汽车|游戏|电商|零售|商品|背景|底图|纹理|壁纸|边框|框架|按钮|贴纸|字体|字效|图标|icon|logo|元素|素材包|样机|模板/i;
+const FLOAT_FORM_PATTERN = /浮窗|悬浮窗|浮标|活动入口|福利入口|红包入口|悬浮入口|运营挂件|活动挂件|侧边挂件|运营贴片|活动贴片/i;
+const FLOAT_CONTEXT_PATTERN = /金融|借款|贷款|助贷|理财|投资|基金|证券|红包|福利|优惠|领券|新客|会员|任务|奖励|活动|营销/i;
+const FLOAT_BLOCKED_PATTERN = /背景|底图|纹理|壁纸|弥散|边框|框架|普通按钮|按钮素材|按钮文字|按钮元素|立体按钮|长条按钮|文字贴纸|贴纸素材|文字素材|字体|字效|图标素材|icon|logo|banner|横幅|海报|主视觉|(?:完整|手机|网页|app).*(?:页面|界面)|导航|菜单/i;
 const DEFAULT_SEARCH_PLANS = [
   {
     type: "popup",
@@ -28,8 +39,8 @@ const DEFAULT_SEARCH_PLANS = [
     type: "float",
     count: 2,
     keywords: [
-      "浮窗", "小浮窗", "悬浮窗素材", "活动浮窗",
-      "红包浮窗", "福利浮窗", "悬浮按钮", "活动浮标"
+      "金融 活动浮窗", "借款 福利浮窗", "贷款 红包浮窗", "理财 活动浮标",
+      "金融 福利入口", "金融 悬浮入口", "借贷 活动挂件", "金融 运营浮标"
     ]
   }
 ];
@@ -53,10 +64,146 @@ export function isSameImage(candidate, references) {
   });
 }
 
-export function isReferenceShapeAllowed(type, width, height, maxFloatHeightToWidthRatio = 2) {
-  if (!width || !height) return false;
-  if (type !== "float") return true;
-  return height / width <= maxFloatHeightToWidthRatio;
+export function minimumReferenceWidth(type, configuredWidth = 720) {
+  return type === "float" ? 1 : Math.max(1, Number(configuredWidth || 720));
+}
+
+export function assessReferenceTitle(type, title) {
+  const value = String(title || "").trim();
+  const reasons = [];
+  if (!value || /^(?:pin[-_ ]?\d+|img[-_ ]?\d+)$/i.test(value)) reasons.push("Pin 标题为空或无有效语义");
+  if (type === "popup") {
+    if (POPUP_ATOMIC_PATTERN.test(value)) reasons.push("标题表明素材是背景、原子元素、按钮、贴纸或海报");
+    if (POPUP_PAGE_PATTERN.test(value) && !POPUP_FORM_PATTERN.test(value)) reasons.push("标题表明素材是完整页面而不是弹窗");
+    if (!POPUP_FORM_PATTERN.test(value) && !POPUP_CONTEXT_PATTERN.test(value)) reasons.push("标题缺少弹窗形态或金融运营语义");
+  } else if (type === "banner") {
+    if (BANNER_BLOCKED_PATTERN.test(value)) reasons.push("标题表明素材属于其他行业或只是背景、元素、按钮、模板");
+    if (!BANNER_CONTEXT_PATTERN.test(value)) reasons.push("标题缺少金融业务语义");
+    if (!BANNER_FORM_PATTERN.test(value)) reasons.push("标题未表明这是完整横幅、首图或营销成品");
+  } else if (type === "float") {
+    if (FLOAT_BLOCKED_PATTERN.test(value)) reasons.push("标题表明素材是背景、边框、原子按钮/贴纸或完整页面");
+    if (!FLOAT_FORM_PATTERN.test(value)) reasons.push("标题未表明这是完整浮窗、浮标、活动入口或运营挂件");
+    if (!FLOAT_CONTEXT_PATTERN.test(value)) reasons.push("标题缺少金融或活动运营语义");
+  }
+  return { accepted: reasons.length === 0, reasons };
+}
+
+export async function assessPopupReferenceVisual(buffer) {
+  const image = sharp(buffer, { failOn: "none" });
+  const metadata = await image.metadata();
+  if (!metadata.width || !metadata.height) return { accepted: false, reasons: ["图片尺寸信息无效"], metrics: {} };
+  if (metadata.hasAlpha) {
+    const standalone = await assessFloatReferenceVisual(buffer);
+    return {
+      ...standalone,
+      reasons: standalone.reasons.map((reason) => `透明弹窗主体不完整：${reason}`)
+    };
+  }
+  const { data, info } = await image.resize(96, 96, { fit: "fill" }).greyscale().raw().toBuffer({ resolveWithObject: true });
+  let centerLuma = 0;
+  let centerPixels = 0;
+  let borderLuma = 0;
+  let borderPixels = 0;
+  let darkBorderPixels = 0;
+  for (let y = 0; y < info.height; y += 1) {
+    for (let x = 0; x < info.width; x += 1) {
+      const luma = data[y * info.width + x];
+      const border = x < 12 || y < 12 || x >= info.width - 12 || y >= info.height - 12;
+      const center = x >= 14 && y >= 14 && x < info.width - 14 && y < info.height - 14;
+      if (border) {
+        borderLuma += luma;
+        borderPixels += 1;
+        if (luma < 90) darkBorderPixels += 1;
+      }
+      if (center) {
+        centerLuma += luma;
+        centerPixels += 1;
+      }
+    }
+  }
+  const metrics = {
+    width: metadata.width,
+    height: metadata.height,
+    hasAlpha: false,
+    centerLuma: centerLuma / centerPixels,
+    borderLuma: borderLuma / borderPixels,
+    darkBorderRatio: darkBorderPixels / borderPixels
+  };
+  metrics.modalContrast = metrics.centerLuma - metrics.borderLuma;
+  const reasons = [];
+  if (metrics.modalContrast < 8 && metrics.darkBorderRatio < 0.15) {
+    reasons.push("画面未呈现可识别的弹窗主体与遮罩/页面背景层级，更像完整活动页");
+  }
+  return { accepted: reasons.length === 0, reasons, metrics };
+}
+
+export async function assessBannerReferenceVisual(buffer) {
+  const metadata = await sharp(buffer, { failOn: "none" }).metadata();
+  if (!metadata.width || !metadata.height) return { accepted: false, reasons: ["图片尺寸信息无效"], metrics: {} };
+  const aspectRatio = metadata.width / metadata.height;
+  const reasons = [];
+  if (aspectRatio < 1.5) reasons.push("画面不是横向 Banner 成品，宽高比低于 1.5");
+  return {
+    accepted: reasons.length === 0,
+    reasons,
+    metrics: { width: metadata.width, height: metadata.height, aspectRatio }
+  };
+}
+
+export async function assessReferenceVisual(type, buffer) {
+  if (type === "popup") return assessPopupReferenceVisual(buffer);
+  if (type === "banner") return assessBannerReferenceVisual(buffer);
+  if (type === "float") return assessFloatReferenceVisual(buffer);
+  return { accepted: true, reasons: [], metrics: {} };
+}
+
+export async function assessFloatReferenceVisual(buffer) {
+  const image = sharp(buffer, { failOn: "none" });
+  const metadata = await image.metadata();
+  if (!metadata.width || !metadata.height) {
+    return { accepted: false, reasons: ["图片尺寸信息无效"], metrics: {} };
+  }
+  if (!metadata.hasAlpha) {
+    return {
+      accepted: false,
+      reasons: ["图片没有透明留白，结构更像背景或完整页面而不是独立浮窗"],
+      metrics: { width: metadata.width, height: metadata.height, hasAlpha: false }
+    };
+  }
+  const { data, info } = await image
+    .resize({ width: 256, height: 256, fit: "inside", withoutEnlargement: true })
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  let foregroundPixels = 0;
+  let clearPixels = 0;
+  let borderForegroundPixels = 0;
+  let borderPixels = 0;
+  for (let y = 0; y < info.height; y += 1) {
+    for (let x = 0; x < info.width; x += 1) {
+      const alpha = data[(y * info.width + x) * info.channels + 3];
+      if (alpha >= 16) foregroundPixels += 1;
+      else clearPixels += 1;
+      if (x < 2 || y < 2 || x >= info.width - 2 || y >= info.height - 2) {
+        borderPixels += 1;
+        if (alpha >= 16) borderForegroundPixels += 1;
+      }
+    }
+  }
+  const total = info.width * info.height;
+  const metrics = {
+    width: metadata.width,
+    height: metadata.height,
+    hasAlpha: true,
+    foregroundRatio: foregroundPixels / total,
+    clearRatio: clearPixels / total,
+    borderForegroundRatio: borderPixels ? borderForegroundPixels / borderPixels : 0
+  };
+  const reasons = [];
+  if (metrics.foregroundRatio < 0.015) reasons.push("透明画布中的有效主体过少");
+  if (metrics.clearRatio < 0.05) reasons.push("主体几乎铺满画布，缺少独立浮窗应有的透明留白");
+  if (metrics.borderForegroundRatio > 0.6) reasons.push("主体大面积触碰画布边缘，更像背景或完整页面");
+  return { accepted: reasons.length === 0, reasons, metrics };
 }
 
 function inferReferenceType(item) {
@@ -167,6 +314,38 @@ async function appendReferenceHistory(history, item, date) {
     updatedAt: new Date().toISOString(),
     references: history.references
   });
+}
+
+async function loadReferenceRejections(outputRoot, runDir) {
+  const globalFile = path.join(outputRoot, REJECTIONS_FILE);
+  const dailyFile = path.join(runDir, REJECTIONS_FILE);
+  const [globalData, dailyData] = await Promise.all([
+    readJson(globalFile, { schemaVersion: 1, rejections: [] }),
+    readJson(dailyFile, { schemaVersion: 1, rejections: [] })
+  ]);
+  const global = Array.isArray(globalData.rejections) ? globalData.rejections : [];
+  const daily = Array.isArray(dailyData.rejections) ? dailyData.rejections : [];
+  return {
+    globalFile,
+    dailyFile,
+    global,
+    daily,
+    pinIds: new Set(global.map((item) => item.pinId).filter(Boolean))
+  };
+}
+
+async function recordReferenceRejection(state, item) {
+  const record = { ...item, rejectedAt: new Date().toISOString() };
+  if (!state.pinIds.has(record.pinId)) {
+    state.global.push(record);
+    state.pinIds.add(record.pinId);
+  }
+  state.daily = state.daily.filter((existing) => existing.pinId !== record.pinId).concat(record);
+  const updatedAt = new Date().toISOString();
+  await Promise.all([
+    writeJsonAtomic(state.globalFile, { schemaVersion: 1, updatedAt, rejections: state.global }),
+    writeJsonAtomic(state.dailyFile, { schemaVersion: 1, updatedAt, rejections: state.daily })
+  ]);
 }
 
 function looksBlocked(text) {
@@ -304,14 +483,41 @@ async function downloadBestImage(context, item, urls, targetFile, minWidth) {
   return best;
 }
 
-async function qualifiedExistingReferences(existing, minWidth, maxFloatHeightToWidthRatio) {
+async function qualifiedExistingReferences(existing, minWidth, rejectionState) {
   const qualified = [];
   for (const item of existing) {
     try {
-      const [metadata, stat] = await Promise.all([sharp(item.file).metadata(), fs.stat(item.file)]);
-      if (!metadata.width || !metadata.height || metadata.width < minWidth) continue;
       const referenceType = inferReferenceType(item);
-      if (!isReferenceShapeAllowed(referenceType, metadata.width, metadata.height, maxFloatHeightToWidthRatio)) continue;
+      const titleAudit = assessReferenceTitle(referenceType, item.title);
+      if (!titleAudit.accepted) {
+        await recordReferenceRejection(rejectionState, {
+          pinId: item.pinId,
+          referenceType,
+          title: item.title,
+          sourceUrl: item.sourceUrl,
+          searchKeyword: item.searchKeyword,
+          stage: "title",
+          reasons: titleAudit.reasons
+        });
+        continue;
+      }
+      const [buffer, stat] = await Promise.all([fs.readFile(item.file), fs.stat(item.file)]);
+      const metadata = await sharp(buffer).metadata();
+      if (!metadata.width || !metadata.height || metadata.width < minimumReferenceWidth(referenceType, minWidth)) continue;
+      const visualAudit = await assessReferenceVisual(referenceType, buffer);
+      if (!visualAudit.accepted) {
+        await recordReferenceRejection(rejectionState, {
+          pinId: item.pinId,
+          referenceType,
+          title: item.title,
+          sourceUrl: item.sourceUrl,
+          searchKeyword: item.searchKeyword,
+          stage: "visual",
+          reasons: visualAudit.reasons,
+          metrics: visualAudit.metrics
+        });
+        continue;
+      }
       qualified.push({
         ...item,
         referenceType,
@@ -331,9 +537,9 @@ export async function collectReferences({ context, page, detailPage: suppliedDet
   const minWidth = Math.max(1, Number(config.collection.minReferenceWidthPx || 720));
   const perKeywordLimit = Math.max(1, Number(config.collection.perKeywordLimit || 2));
   const maxSearchScrolls = Math.max(1, Number(config.collection.maxSearchScrolls || 20));
-  const maxFloatHeightToWidthRatio = Math.max(1, Number(config.collection.maxFloatHeightToWidthRatio || 2));
   const plans = buildSearchPlans(config.collection, count, date);
-  const results = await qualifiedExistingReferences(existing, minWidth, maxFloatHeightToWidthRatio);
+  const rejectionState = await loadReferenceRejections(config.outputRoot, runDir);
+  const results = await qualifiedExistingReferences(existing, minWidth, rejectionState);
   if (results.length !== existing.length) await writeJsonAtomic(path.join(runDir, "references.json"), results);
   const existingSelection = selectReferencesForPlans(results, plans);
   if (existingSelection) return existingSelection;
@@ -348,7 +554,7 @@ export async function collectReferences({ context, page, detailPage: suppliedDet
       let acceptedForType = existingForType;
       for (const query of plan.keywords) {
         if (acceptedForType >= plan.count) break;
-        const excluded = new Set([...history.pinIds, ...attemptedPinIds]);
+        const excluded = new Set([...history.pinIds, ...rejectionState.pinIds, ...attemptedPinIds]);
         const candidates = await searchPins(
           page,
           query,
@@ -360,13 +566,46 @@ export async function collectReferences({ context, page, detailPage: suppliedDet
         for (const candidate of candidates) {
           if (acceptedForType >= plan.count || acceptedForQuery >= perKeywordLimit) break;
           attemptedPinIds.add(candidate.pinId);
+          const titleAudit = assessReferenceTitle(plan.type, candidate.title);
+          if (!titleAudit.accepted) {
+            await recordReferenceRejection(rejectionState, {
+              pinId: candidate.pinId,
+              referenceType: plan.type,
+              title: candidate.title,
+              sourceUrl: candidate.sourceUrl,
+              searchKeyword: query,
+              stage: "title",
+              reasons: titleAudit.reasons
+            });
+            console.warn(`跳过 Pin ${candidate.pinId}：${titleAudit.reasons.join("；")}`);
+            continue;
+          }
           const tempFile = path.join(referencesDir, `.tmp-${candidate.pinId}`);
           try {
             const urls = await resolveDetailImageUrls(detailPage, candidate);
-            const downloaded = await downloadBestImage(context, candidate, urls, tempFile, minWidth);
+            const downloaded = await downloadBestImage(
+              context,
+              candidate,
+              urls,
+              tempFile,
+              minimumReferenceWidth(plan.type, minWidth)
+            );
             const { buffer, metadata, imageUrl, fileSize } = downloaded;
-            if (!isReferenceShapeAllowed(plan.type, metadata.width, metadata.height, maxFloatHeightToWidthRatio)) {
-              throw new Error(`Pin ${candidate.pinId} 为 ${metadata.width}x${metadata.height}，形状更像完整手机页面而不是独立浮窗`);
+            const visualAudit = await assessReferenceVisual(plan.type, buffer);
+            if (!visualAudit.accepted) {
+              await recordReferenceRejection(rejectionState, {
+                pinId: candidate.pinId,
+                referenceType: plan.type,
+                title: candidate.title,
+                sourceUrl: candidate.sourceUrl,
+                searchKeyword: query,
+                stage: "visual",
+                reasons: visualAudit.reasons,
+                metrics: visualAudit.metrics
+              });
+              await fs.unlink(tempFile).catch(() => {});
+              console.warn(`跳过 Pin ${candidate.pinId}：${visualAudit.reasons.join("；")}`);
+              continue;
             }
             const sha256 = crypto.createHash("sha256").update(buffer).digest("hex");
             const ahash = await averageHash(buffer);
