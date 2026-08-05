@@ -20,10 +20,10 @@
     "maxScannedCandidatesPerDirection": 30,
     "maxCandidatesPerKeyword": 3,
     "maxDownloadedCandidatesPerDirection": 8,
-    "visualReviewBatchSize": 4,
+    "visualReviewBatchSize": 3,
     "visualReviewTimeoutMinutes": 2,
     "visualReviewMaxAttempts": 2,
-    "visualReviewMinimumScore": 70,
+    "visualReviewMinimumScore": 60,
     "maxSearchScrolls": 20,
     "searchPlans": [
       {

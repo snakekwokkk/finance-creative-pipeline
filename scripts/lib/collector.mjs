@@ -668,7 +668,7 @@ export async function collectReferences({
   const minWidth = Math.max(1, Number(config.collection.minReferenceWidthPx || 720));
   const maxSearchScrolls = Math.max(1, Number(config.collection.maxSearchScrolls || 20));
   const maxCandidatesPerKeyword = Math.max(1, Number(config.collection.maxCandidatesPerKeyword || 3));
-  const visualReviewBatchSize = Math.max(1, Math.min(4, Number(config.collection.visualReviewBatchSize || 4)));
+  const visualReviewBatchSize = Math.max(1, Math.min(3, Number(config.collection.visualReviewBatchSize || 3)));
   const visualReviewMaxAttempts = Math.max(1, Number(config.collection.visualReviewMaxAttempts || 2));
   const plans = buildSearchPlans(config.collection, count, date);
   const rejectionState = await loadReferenceRejections(config.outputRoot, runDir);

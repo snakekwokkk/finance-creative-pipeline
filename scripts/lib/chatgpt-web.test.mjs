@@ -143,7 +143,8 @@ test("reference content audits live in dated-project chats and rely on image con
   const prompt = referenceAuditPrompt("popup", candidates);
   assert.match(prompt, /最终结论必须以图片实际内容为主/);
   assert.match(prompt, /拒绝背景、按钮、优惠券、金币、图标、装饰元素/);
-  assert.match(prompt, /financeRelevant 30%/);
+  assert.match(prompt, /financeRelevant 50%/);
+  assert.match(prompt, /阿拉伯数字、汉字“元”、¥、\$、%、金币、优惠券、仪表盘、红包、利息\/息费/);
   assert.doesNotMatch(prompt, /真实品牌Logo、二维码、其他行业、夸大金融承诺/);
   assert.match(prompt, /candidate-p1\.webp/);
 
@@ -153,8 +154,8 @@ REFERENCE_AUDIT_END`, candidates);
   assert.equal(parsed.candidates[0].accepted, true);
   assert.equal(parsed.candidates[1].accepted, false);
   const softSignals = parseReferenceAudit(`REFERENCE_AUDIT_START
-{"candidates":[{"pinId":"p1","typeMatch":true,"completeDesign":true,"financeRelevant":true,"structureValid":false,"usableReference":false,"score":70}]}
-REFERENCE_AUDIT_END`, [candidates[0]], 70);
+{"candidates":[{"pinId":"p1","typeMatch":true,"completeDesign":true,"financeRelevant":true,"structureValid":false,"usableReference":false,"score":60}]}
+REFERENCE_AUDIT_END`, [candidates[0]], 60);
   assert.equal(softSignals.candidates[0].accepted, true);
   assert.throws(() => parseReferenceAudit(`REFERENCE_AUDIT_START
 {"candidates":[{"pinId":"p1","score":90}]}
