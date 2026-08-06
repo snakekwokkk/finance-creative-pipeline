@@ -8,6 +8,7 @@ import {
   ensureChatGptLoggedIn,
   ensureDailyProject,
   generateDirections,
+  reopenDailyProject,
   readyDirectionsForFigma,
   reviewReferenceCandidates,
   workflowAbortedError,
@@ -123,7 +124,9 @@ try {
 
   await updateRun(runFile, { status: "running", blocker: null, browserSession, stages: { collection: "running", generation: "pending", decomposition: "pending", figma: "pending" } });
   await ensureChatGptLoggedIn(chatgpt);
-  const dailyProject = await ensureDailyProject(chatgpt, runConfig, date);
+  const dailyProject = existingRun?.chatgptProject?.url
+    ? await reopenDailyProject(chatgpt, runConfig, date, existingRun.chatgptProject)
+    : await ensureDailyProject(chatgpt, runConfig, date);
   const chatgptProject = { ...dailyProject, resolvedAt: new Date().toISOString() };
   await updateRun(runFile, { chatgptProject });
   const references = await collectReferences({

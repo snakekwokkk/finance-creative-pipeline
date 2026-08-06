@@ -323,6 +323,21 @@ export async function ensureDailyProject(page, config, date) {
   return { enabled: true, name, url: `${baseUrl}/project`, baseUrl };
 }
 
+export async function reopenDailyProject(page, config, date, savedProject) {
+  const name = dailyProjectName(config, date);
+  if (!savedProject?.enabled || savedProject.name !== name) {
+    throw new Error(`已记录的 ChatGPT 日期项目无效，无法恢复“${name}”`);
+  }
+  const baseUrl = projectBaseUrl(savedProject.url || savedProject.baseUrl);
+  if (!baseUrl) throw new Error(`已记录的 ChatGPT 日期项目“${name}”缺少有效 URL`);
+  await navigateWithRetry(page, `${baseUrl}/project`);
+  await waitForComposer(page);
+  if (projectBaseUrl(page.url()) !== baseUrl) {
+    throw new Error(`未能恢复 ChatGPT 项目“${name}”，已停止以避免聊天串线`);
+  }
+  return { enabled: true, name, url: `${baseUrl}/project`, baseUrl };
+}
+
 export async function openDirectionChat(page, project, savedChatUrl = null) {
   let target = project.url;
   if (savedChatUrl) {
