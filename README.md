@@ -23,8 +23,8 @@ Finance Creative Pipeline 是一个面向中国互联网金融运营素材的 Co
 1. 使用持久化 Chrome 从花瓣详情页采集高分辨率可见参考图，并保留来源链接和尺寸信息。
 2. 通过 ChatGPT 网页版分析参考图，并为每个方向生成一张品牌中性的完整预览图。
 3. 每天创建或复用一个日期项目，每个方向只使用一个项目内聊天；该方向的生图和语义拆图都在同一聊天完成，透明素材从最终预览的源像素中本地提取。
-4. 将预览图继续提交到同一聊天，识别复杂视觉元素并生成语义化 `layers.json`。
-5. 先让 ChatGPT 输出完整资产清单，再按 80% 原生还原阈值把复杂主视觉、3D 物体、徽章、红包外壳和插图逐个交给 ChatGPT，每个元素单独生成一张透明 PNG。
+4. 在同一聊天中直接要求 ChatGPT 基于刚生成的预览图识别复杂视觉元素并生成语义化 `layers.json`，不重复上传预览图。
+5. 按 80% 原生还原阈值从完整预览的源像素本地提取复杂主视觉、3D 物体、徽章、红包外壳和插图。
 6. 将预览图、通过检查的透明独立素材和原生文字/几何图层同步到 Figma。
 
 默认正式运行会采集 10 张参考图并生成 10 个原创方向：6 个弹窗、2 个 Banner、2 个浮窗，每个方向使用 1 张同类型参考图。
@@ -36,7 +36,7 @@ Finance Creative Pipeline 是一个面向中国互联网金融运营素材的 Co
 - 弹窗方向只生成弹窗本体与干净的外部安全留白，不生成 App 页面、搜索栏、导航栏、底部 Tab、页面卡片或虚化界面背景。
 - 以 80% 原生还原阈值决定拆图；复杂主视觉、3D物体、人物、吉祥物、渐变折面、立体徽章、红包外壳和复杂插画低于阈值时逐元素拆分，真正简单的卡片、按钮、普通图标、图表和装饰才由 Figma 原生重构。
 - 普通功能图标优先从 [Remix Icon](https://remixicon.com/) 匹配官方 SVG，并以可编辑矢量导入 Figma；不再手绘临时图标或使用无语义占位形状。
-- 参考图只用于借鉴版式、颜色、材质和元素类别，生成稿整体相似度控制在约 60% 以内，并在构图、主视觉、信息结构、装饰形态中至少改变三项；文案必须更换活动场景、利益点和句式。
+- 参考图用于确定主视觉类别、材质气质、颜色关系和信息层级；可保留相近的金融主体（如红包或相近权益材质），同时重设计具体造型细节、文案和局部排布，避免完整照搬。
 - 透明素材使用本地背景差分从最终预览中直接抠取，RGB 像素来自预览原图，不再让 ChatGPT 重绘。视觉上连成一体的复杂主视觉作为一个整体提取。
 - 本地只裁掉透明空白并执行 Alpha 与边界质量检查，不会推断前景蒙版。
 - 没有真实 Alpha、带底色、内容为空或触碰图片边界的最终透明素材会被拒绝，也不会上传到 Figma；浮窗参考图在采集阶段可以是不透明的单个金融 3D/插图元素，生成预览后再从预览源像素提取透明主体。
@@ -283,7 +283,7 @@ A normal run collects 10 references and generates 10 original directions: six po
 - Popup directions generate only the popup body with a clean outer safety margin. They must not generate an App page, search bar, navigation, bottom tabs, page cards, or a blurred interface background.
 - Use an 80% native-fidelity threshold: complex hero visuals, 3D objects, people, mascots, gradient folds, embossed badges, envelope shells, and non-reconstructable illustrations below the threshold become separate PNG assets. Truly simple cards, buttons, ordinary icons, charts, and decorations stay native in Figma.
 - Match ordinary functional icons against official [Remix Icon](https://remixicon.com/) SVGs first and import them as editable Figma vectors instead of hand-drawing temporary icons or using generic placeholders.
-- References provide layout, color, material, and element-category inspiration only. Generated work must stay at roughly 60% similarity or less, substantially change at least three design axes, and use a new campaign scenario, benefit, and sentence structure.
+- References provide the visual category, material feel, color relationship, and information hierarchy. Generated work may retain a similar financial subject while redesigning concrete shape details, copy, and local layout instead of copying the full design.
 - Transparent assets are extracted from final-preview source pixels with local background matting instead of being redrawn by ChatGPT. Visually connected hero objects stay grouped as one asset.
 - Local processing only trims transparent margins and validates Alpha and image boundaries.
 - Opaque, colored-background, empty, or boundary-touching assets are rejected and never uploaded to Figma.

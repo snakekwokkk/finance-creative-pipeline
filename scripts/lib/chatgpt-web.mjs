@@ -835,7 +835,7 @@ export function analysisPrompt(index, type) {
     : type === "float"
       ? '["Standalone Financial Element", "Optional CTA", "Icon", "Title", "Subtitle", "Decorations"]'
       : '["Background", "Decorations", "Icon", "Title", "Subtitle", "CTA"]';
-  return `你是一名中国互联网金融运营视觉设计师。请直接分析我上传的一张参考图，为第${index}套方向输出品牌中性的原创设计规格。${popupRule}${floatRule}\n\n参考图只能提供版式逻辑、色彩关系、材质气质和元素类别，不是临摹模板。成品与参考图的整体视觉相似度上限约为 60%，不得复刻参考图的具体主视觉造型、装饰轮廓、卡片细节或文字表达。至少在构图、主视觉、信息结构、装饰形态中选择三项做实质变化，同时保持目标类型和金融运营语义成立。文案必须重新确定活动场景与利益点，不得只替换数字、同义词或沿用参考图的句式；不得出现连续 4 个及以上与参考图相同的非通用汉字。\n\n不要套用固定模板，也不要把所有方向写成相同的蓝色渐变卡片。现代风格硬约束：使用实色或克制渐变、哑光/细腻材质和清晰边界；禁止冰透玻璃、过度透明、泛光、镜头光晕、随机粒子、无意义星芒、过多金币、环形光轨和油腻的 3D 图标；装饰最多 3 组。\n\n同时输出 referenceStructure、transformationPlan 和 assetInventory：referenceStructure 只记录可借鉴的抽象版式关系；transformationPlan 明确列出至少三项与参考图不同的变化；assetInventory 将视觉上连成一体的复杂主视觉归为一个对象，给出 id、role、bbox、nativeFidelity（用 Figma 基础图形和文字重建的预计完成度）以及 mustRaster（nativeFidelity < 0.8 时必须为 true）。\n\n只输出以下标记包裹的合法JSON，不要增加解释：\nFINANCE_SPEC_START\n{\n  "keywords": ["参考图启发的原创视觉关键词"],\n  "composition": "重新设计后的构图与比例描述",\n  "referenceStructure": {"subject": "抽象主体类型", "regions": [{"name": "区域", "relativeBox": [0,0,1,1], "purpose": "作用"}], "focus": "视觉重心"},\n  "transformationPlan": [{"axis":"composition|hero|information|decoration|copy","change":"与参考图的实质差异"}],\n  "assetInventory": [{"id": "asset_id", "role": "完整复杂主视觉组", "bbox": [0,0,1,1], "nativeFidelity": 0.5, "mustRaster": true, "containsText": false}],\n  "palette": ["#RRGGBB"],\n  "components": ${components},\n  "typography": "字体气质",\n  "copy": {"title": "全新活动场景标题", "subtitle": "全新利益点副标题", "cta": "全新按钮文案"},\n  "imagePrompt": "引用抽象版式关系并逐项执行 transformationPlan 的原创生成提示词"\n}\nFINANCE_SPEC_END\n\n文案不得承诺必下款、百分百审批、固定收益或伪造监管背书。`;
+  return `你是一名中国互联网金融运营视觉设计师。请直接分析我上传的一张参考图，为第${index}套方向输出品牌中性的原创设计规格。${popupRule}${floatRule}\n\n参考图用于确定主视觉类别、轮廓方向、材质气质、色彩关系和信息层级。保留与参考图相近的金融视觉语义，例如红包可继续使用红包或相近的金融权益材质；同时重新设计具体造型细节、文案和局部排布，避免完整照搬。文案必须使用新的活动场景和利益点，不得出现真实Logo、品牌名、二维码、手机号、必下款、百分百审批、固定收益或伪造监管背书。\n\n不要套用固定模板，也不要把所有方向写成相同的蓝色渐变卡片。现代风格硬约束：使用实色或克制渐变、哑光/细腻材质和清晰边界；禁止冰透玻璃、过度透明、泛光、镜头光晕、随机粒子、无意义星芒、过多金币、环形光轨和油腻的 3D 图标；装饰最多 3 组。\n\n同时输出 referenceStructure、transformationPlan 和 assetInventory：referenceStructure 记录可延续的主体、版式关系和视觉重心；transformationPlan 说明保留的视觉类别及重新设计的细节；assetInventory 将视觉上连成一体的复杂主视觉归为一个对象，给出 id、role、bbox、nativeFidelity（用 Figma 基础图形和文字重建的预计完成度）以及 mustRaster（nativeFidelity < 0.8 时必须为 true）。\n\n只输出以下标记包裹的合法JSON，不要增加解释：\nFINANCE_SPEC_START\n{\n  "keywords": ["参考图启发的原创视觉关键词"],\n  "composition": "延续主体类别并重新设计后的构图与比例描述",\n  "referenceStructure": {"subject": "可延续的主体类型", "regions": [{"name": "区域", "relativeBox": [0,0,1,1], "purpose": "作用"}], "focus": "视觉重心"},\n  "transformationPlan": [{"axis":"hero|copy|detail|layout","change":"保留类别后的重新设计说明"}],\n  "assetInventory": [{"id": "asset_id", "role": "完整复杂主视觉组", "bbox": [0,0,1,1], "nativeFidelity": 0.5, "mustRaster": true, "containsText": false}],\n  "palette": ["#RRGGBB"],\n  "components": ${components},\n  "typography": "字体气质",\n  "copy": {"title": "全新活动场景标题", "subtitle": "全新利益点副标题", "cta": "全新按钮文案"},\n  "imagePrompt": "保留主视觉类别与材质气质、重新设计细节和文案的生成提示词"\n}\nFINANCE_SPEC_END`;
 }
 
 export function previewPrompt(spec, width, height, type, index = "") {
@@ -845,25 +845,7 @@ export function previewPrompt(spec, width, height, type, index = "") {
   const floatRule = type === "float"
     ? "\n\n这是浮窗/单元素素材。只生成参考图对应的独立金融主体，允许是单个 3D 素材、插图、红包、金币、徽章或‘主体+按钮’，不要补成完整 App 页面、长海报或大信息卡。主体周围留干净安全区，确保后续可以独立提取。"
     : "";
-  return `请根据第${index}套参考图和下面的规格生成一张品牌中性的中国互联网金融运营素材，画布比例约为 ${width}:${height}。参考图只用于借鉴版式逻辑、色彩关系、材质气质和元素类别，不能临摹。整体视觉相似度必须控制在约 60% 以内：不得复制具体主视觉造型、装饰轮廓、卡片细节或文字表达，并严格执行 transformationPlan，确保构图、主视觉、信息结构、装饰形态中至少三项有明显变化。文案必须是全新活动场景和利益点，不能只改数字或换同义词，不得沿用参考图句式。不要套用固定模板，也不要把不同方向生成成同一张图。不出现真实Logo、品牌名、二维码或手机号。${popupRule}${floatRule}\n\n现代风格硬约束：实色或克制渐变、哑光或细腻材质、清晰边界、少量阴影；禁止冰透玻璃、过度透明、泛光、镜头光晕、随机粒子、无意义星芒、环形光轨、堆叠金币和油腻 3D 图标。装饰最多 3 组。\n\n${JSON.stringify(spec, null, 2)}`;
-}
-
-export function originalityAuditPrompt(referenceFilename, previewFilename) {
-  return `请比较刚刚上传的两张图片：参考图“${referenceFilename}”和新生成稿“${previewFilename}”。只评估新生成稿是否完成了原创改造，不要生成图片。\n\n给出0到100的 similarityScore，100表示几乎临摹，0表示完全无关。changedAxes 只能从 composition、hero、information、decoration、copy 中选择，只有发生实质变化才计入；仅改颜色、数字、同义词、局部尺寸或轻微位移不算实质变化。copiedTextFragments 列出两图连续4个及以上相同的非通用汉字片段。pass 只有在 similarityScore <= 60、changedAxes 至少3项、copiedTextFragments 为空时才能为 true。\n\n只输出标记包裹的合法JSON，不要解释：\nORIGINALITY_AUDIT_START\n{"similarityScore":55,"changedAxes":["composition","hero","copy"],"copiedTextFragments":[],"pass":true,"reasons":["简短依据"]}\nORIGINALITY_AUDIT_END`;
-}
-
-export function parseOriginalityAudit(text) {
-  const audit = extractMarkedJson(text, "ORIGINALITY_AUDIT_START", "ORIGINALITY_AUDIT_END");
-  const similarityScore = Number(audit?.similarityScore);
-  const allowedAxes = new Set(["composition", "hero", "information", "decoration", "copy"]);
-  const changedAxes = [...new Set((audit?.changedAxes || []).filter((axis) => allowedAxes.has(axis)))];
-  const copiedTextFragments = (audit?.copiedTextFragments || []).map(String).filter(Boolean);
-  const pass = Number.isFinite(similarityScore)
-    && similarityScore <= 60
-    && changedAxes.length >= 3
-    && copiedTextFragments.length === 0
-    && audit?.pass === true;
-  return { ...audit, similarityScore, changedAxes, copiedTextFragments, pass };
+  return `请根据第${index}套参考图和下面的规格生成一张品牌中性的中国互联网金融运营素材，画布比例约为 ${width}:${height}。保留与参考图相近的主视觉类别、材质气质、色彩关系和信息层级；例如参考图以红包为主视觉时，可继续使用红包或相近的金融权益材质。重新设计具体造型细节、文案和局部排布，避免完整照搬。文案使用新的活动场景和利益点；不要套用固定模板，也不要把不同方向生成成同一张图。不出现真实Logo、品牌名、二维码或手机号。${popupRule}${floatRule}\n\n现代风格硬约束：实色或克制渐变、哑光或细腻材质、清晰边界、少量阴影；禁止冰透玻璃、过度透明、泛光、镜头光晕、随机粒子、无意义星芒、环形光轨、堆叠金币和油腻 3D 图标。装饰最多 3 组。\n\n${JSON.stringify(spec, null, 2)}`;
 }
 
 export function decompositionPrompt(index, width, height, maxAssets, type) {
@@ -873,17 +855,7 @@ export function decompositionPrompt(index, width, height, maxAssets, type) {
   const floatRule = type === "float"
     ? "\n\n这是浮窗/单元素方向。只输出参考图中的独立金融主体及可选按钮，不要补出完整页面、长海报或环境背景；一个 3D 素材、插图、红包、金币、徽章或‘元素+按钮’也可以作为完整方向。"
     : "";
-  return `分析第${index}套完整运营图（${width}x${height}），输出供 Figma 重构的图层 JSON。逐层输出背景、卡片、按钮、文字、图标、装饰和主视觉。视觉上连成一体、共同构成一个主视觉的复杂对象必须合并为一个 raster 组，例如“盾牌+箭头+基座+附属金币”或“红包+挂件+贴附飘带”；不要把同一主视觉拆成多个会错位的零件。只有空间上彼此独立、可单独移动的复杂视觉才分成不同 raster。每个 raster 的 bbox 必须紧贴完整主体并留约 3% 安全边距，且不得包含文字。每层提供0到1的bbox、zIndex、confidence，并增加 nativeFidelity（用 Figma 基础图形和文字重建的预计完成度）。${popupRule}${floatRule}\n\neditable只能是background、raster、vector或text。nativeFidelity < 0.8，或对象包含复杂 3D 材质、渐变折面、立体徽章、复杂插图、独特主视觉时，editable 必须为 raster；nativeFidelity >= 0.8 且确实是简单几何、普通功能图标、文字或纯色按钮时才用 vector/text。最多 ${maxAssets} 个 raster，每个复杂主视觉组必须有唯一 id 和 assetPrompt。每个普通功能图标使用kind=icon，并增加icon对象：query用2到4个简短英文词准确描述图标语义，style只可为line或fill，color使用原图十六进制颜色。\n\n只输出以下标记包裹的合法JSON，不要解释。严格只用三行：第一行DECOMPOSE_START，第二行是完整的单行紧凑JSON，第三行DECOMPOSE_END。JSON内部不得换行或缩进，不要使用Markdown代码块。\nDECOMPOSE_START\n{"schemaVersion":4,"canvas":{"width":${width},"height":${height}},"layers":[]}\nDECOMPOSE_END\n\n必须把识别出的完整 layers 数组填入 JSON；不要改写文字，不要猜看不清的内容，不要输出蒙版或多边形。`;
-}
-
-export function separateAssetPrompt(layer) {
-  const subject = layer.assetPrompt || layer.role || layer.id;
-  const box = layer.bbox ? `，位置约为 x=${layer.bbox.x}、y=${layer.bbox.y}、width=${layer.bbox.width}、height=${layer.bbox.height}` : "";
-  return `请从刚刚重新上传的完整预览图中，只提取 id=${layer.id} 的“${subject}”${box}。这是原图提取任务，不是重新设计；保持原始造型、比例、颜色、材质、光影和细节，只输出这一件独立的透明背景高清 PNG。不要带入上一张生成图、其他对象、文字、底色、色雾、棋盘格或拼图。`;
-}
-
-export function separateAssetCorrectionPrompt(layer, reason) {
-  return `上一张 id=${layer.id} 的“${layer.assetPrompt || layer.role || layer.id}”不合格：${reason}。请重新查看刚刚重新上传的完整预览图，只提取这个对象，保持原始形状、比例、颜色、材质和细节；只输出真实透明背景 PNG，不要复用上一张图，不要底色、棋盘格、文字或其他元素。`;
+  return `直接分析当前对话中刚生成的第${index}套完整运营预览图（${width}x${height}），无需上传或重新上传该图，输出供 Figma 重构的图层 JSON。逐层输出背景、卡片、按钮、文字、图标、装饰和主视觉。视觉上连成一体、共同构成一个主视觉的复杂对象必须合并为一个 raster 组，例如“盾牌+箭头+基座+附属金币”或“红包+挂件+贴附飘带”；不要把同一主视觉拆成多个会错位的零件。只有空间上彼此独立、可单独移动的复杂视觉才分成不同 raster。每个 raster 的 bbox 必须紧贴完整主体并留约 3% 安全边距，且不得包含文字。每层提供0到1的bbox、zIndex、confidence，并增加 nativeFidelity（用 Figma 基础图形和文字重建的预计完成度）。${popupRule}${floatRule}\n\neditable只能是background、raster、vector或text。nativeFidelity < 0.8，或对象包含复杂 3D 材质、渐变折面、立体徽章、复杂插图、独特主视觉时，editable 必须为 raster；nativeFidelity >= 0.8 且确实是简单几何、普通功能图标、文字或纯色按钮时才用 vector/text。最多 ${maxAssets} 个 raster，每个复杂主视觉组必须有唯一 id 和 assetPrompt。每个普通功能图标使用kind=icon，并增加icon对象：query用2到4个简短英文词准确描述图标语义，style只可为line或fill，color使用原图十六进制颜色。\n\n只输出以下标记包裹的合法JSON，不要解释。严格只用三行：第一行DECOMPOSE_START，第二行是完整的单行紧凑JSON，第三行DECOMPOSE_END。JSON内部不得换行或缩进，不要使用Markdown代码块。\nDECOMPOSE_START\n{"schemaVersion":4,"canvas":{"width":${width},"height":${height}},"layers":[]}\nDECOMPOSE_END\n\n必须把识别出的完整 layers 数组填入 JSON；不要改写文字，不要猜看不清的内容，不要输出蒙版或多边形。`;
 }
 
 export function selectDirectionReference(references, type, typeIndex) {
@@ -1107,7 +1079,6 @@ export async function decomposePreview(
           }
         }
         if (!analysis) {
-          await attachFiles(page, [previewFile]);
           const messages = page.locator('[data-message-author-role="assistant"]');
           if (responseBaseline === null) responseBaseline = await messages.count();
           await sendPrompt(page, decompositionPrompt(index, width, height, maxAssets, type));
@@ -1415,17 +1386,14 @@ export async function generateDirections({
           attempts: previewAttempts,
           stage: "generation",
           label: "预览生成",
-          operation: async ({ attempt, lastError: previousAttemptError }) => {
+          operation: async () => {
             const attemptStartedAt = Date.now();
             await ensureDirectionChat();
             // The analysis attachment is consumed by the previous turn; make
             // the preview request explicitly reference-conditioned.
             await attachFiles(page, referenceFiles);
             const previewImageSources = await visibleImageSources(page);
-            const correction = previousAttemptError?.originalityAudit
-              ? `\n\n上一版原创性验收未通过：${JSON.stringify(previousAttemptError.originalityAudit)}。本次必须针对这些原因做更明显的重新设计。`
-              : "";
-            await sendPrompt(page, `${previewPrompt(cachedSpec, size.width, size.height, type, index)}${correction}`);
+            await sendPrompt(page, previewPrompt(cachedSpec, size.width, size.height, type, index));
             await saveLastAssistantImage(
               page,
               previewFile,
@@ -1434,20 +1402,6 @@ export async function generateDirections({
               referenceFiles
             );
             await rememberConversation();
-            await attachFiles(page, [reference.file, previewFile]);
-            const auditResponse = await sendAndRead(
-              page,
-              originalityAuditPrompt(path.basename(reference.file), path.basename(previewFile)),
-              minuteTimeout(config.generation.analysisTimeoutMinutes || 5)
-            );
-            const originalityAudit = parseOriginalityAudit(auditResponse.text);
-            await fs.writeFile(path.join(directionDir, `originality-audit-attempt-${attempt}.txt`), auditResponse.text, "utf8");
-            await writeJsonAtomic(path.join(directionDir, "originality-audit.json"), originalityAudit);
-            if (!originalityAudit.pass) {
-              const error = new Error(`原创性验收未通过：相似度 ${originalityAudit.similarityScore}%，实质变化 ${originalityAudit.changedAxes.length} 项，复用文案 ${originalityAudit.copiedTextFragments.length} 处`);
-              error.originalityAudit = originalityAudit;
-              throw error;
-            }
           },
           onFailure: async ({ attempt, error }) => {
             if (chatOpened) await rememberConversation().catch(() => {});
