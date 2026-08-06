@@ -20,11 +20,11 @@
 
 Finance Creative Pipeline 是一个面向中国互联网金融运营素材的 Codex 插件。它通过可恢复的本地流水线完成以下工作：
 
-1. 使用持久化 Chrome 配置从花瓣 Pin 详情页采集高分辨率可见参考图，并保留来源链接和尺寸信息。
+1. 使用持久化 Chrome 从花瓣详情页采集高分辨率可见参考图，并保留来源链接和尺寸信息。
 2. 通过 ChatGPT 网页版分析参考图，并为每个方向生成一张品牌中性的完整预览图。
-3. 每天创建或复用一个日期项目，每个方向只使用一个项目内聊天；该方向的生图、拆图和透明素材提取都在同一聊天完成。
+3. 每天创建或复用一个日期项目，每个方向只使用一个项目内聊天；该方向的生图和语义拆图都在同一聊天完成，透明素材从最终预览的源像素中本地提取。
 4. 将预览图继续提交到同一聊天，识别复杂视觉元素并生成语义化 `layers.json`。
-5. 只把无法用 Figma 基础图形可靠重构的复杂主视觉逐个交给 ChatGPT，每个元素单独生成一张透明 PNG。
+5. 先让 ChatGPT 输出完整资产清单，再按 80% 原生还原阈值把复杂主视觉、3D 物体、徽章、红包外壳和插图逐个交给 ChatGPT，每个元素单独生成一张透明 PNG。
 6. 将预览图、通过检查的透明独立素材和原生文字/几何图层同步到 Figma。
 
 默认正式运行会采集 10 张参考图并生成 10 个原创方向：6 个弹窗、2 个 Banner、2 个浮窗，每个方向使用 1 张同类型参考图。
@@ -34,19 +34,21 @@ Finance Creative Pipeline 是一个面向中国互联网金融运营素材的 Co
 - 图片生成必须使用 ChatGPT 网页版，不以 Codex 图片生成作为替代。
 - 每个方向生成一张完整预览图；每个复杂素材都使用独立的 ChatGPT 任务和独立 PNG，不生成多元素素材板。
 - 弹窗方向只生成弹窗本体与干净的外部安全留白，不生成 App 页面、搜索栏、导航栏、底部 Tab、页面卡片或虚化界面背景。
-- 只拆复杂主视觉、3D物体、人物、吉祥物或复杂插画；卡片、按钮、普通图标、图表和简单装饰由 Figma 原生重构。
+- 以 80% 原生还原阈值决定拆图；复杂主视觉、3D物体、人物、吉祥物、渐变折面、立体徽章、红包外壳和复杂插画低于阈值时逐元素拆分，真正简单的卡片、按钮、普通图标、图表和装饰才由 Figma 原生重构。
 - 普通功能图标优先从 [Remix Icon](https://remixicon.com/) 匹配官方 SVG，并以可编辑矢量导入 Figma；不再手绘临时图标或使用无语义占位形状。
-- ChatGPT 必须从原图单独提取并保持造型、比例、颜色、光影和细节，不得重新设计；本地不运行 Apple Vision 或其他 AI 抠图模型。
+- 参考图只用于借鉴版式、颜色、材质和元素类别，生成稿整体相似度控制在约 60% 以内，并在构图、主视觉、信息结构、装饰形态中至少改变三项；文案必须更换活动场景、利益点和句式。
+- 透明素材使用本地背景差分从最终预览中直接抠取，RGB 像素来自预览原图，不再让 ChatGPT 重绘。视觉上连成一体的复杂主视觉作为一个整体提取。
 - 本地只裁掉透明空白并执行 Alpha 与边界质量检查，不会推断前景蒙版。
-- 没有真实 Alpha、带底色、内容为空或触碰图片边界的素材会被拒绝，也不会上传到 Figma。
+- 没有真实 Alpha、带底色、内容为空或触碰图片边界的最终透明素材会被拒绝，也不会上传到 Figma；浮窗参考图在采集阶段可以是不透明的单个金融 3D/插图元素，生成预览后再从预览源像素提取透明主体。
 - 每个运行日期只使用一个名为 `金融运营素材 YYYY-MM-DD` 的 ChatGPT 项目。候选内容审核聊天 `采集筛选-弹窗/Banner/浮窗` 和正式方向聊天都保存在该日期项目内；每个设计方向仍只使用一个聊天完成分析、生图、拆图和透明素材提取。
 - 项目内聊天会显式命名为 `弹窗1` 至 `弹窗6`、`Banner1` 至 `Banner2`、`浮窗1` 至 `浮窗2`；编号在各素材类型内独立计算，验证运行中的每个类型从 1 开始。
 - 参考图使用 ChatGPT 图片专用上传控件；只有该方向 1 张附件的文件名、缩略图和发送状态全部验证通过后才发送分析提示词。若 ChatGPT 回复未收到图片，流水线会清理草稿并重新上传，不会继续无图生图。
 - 流水线从 `run.json` 和 `figma-manifest.json` 恢复，避免重复采集、重复生成和重复创建 Figma 日期分区。
-- 参考图按类型采集：弹窗、Banner、浮窗分别使用匹配的关键词池和数量配额，不混用搜索词。搜索词负责方向，尺寸和透明度负责基础过滤，ChatGPT Web 根据图片实际内容做最终判断；花瓣标题只用于快速排除明确写着背景、按钮、原子元素、模板或其他行业的候选。
+- 每次运行固定使用花瓣作为参考图来源。
+- 参考图按类型采集：弹窗、Banner、浮窗分别使用匹配的关键词池和数量配额，不混用搜索词。搜索词负责方向，尺寸和透明度负责基础过滤，ChatGPT Web 根据图片实际内容做最终判断；浮窗允许金融 3D 素材、插图、红包、金币、徽章或元素加按钮，花瓣标题只用于快速排除明确写着背景、模板、完整页面或其他行业的候选。
 - 每个缺失方向最多扫描 30 个未见 Pin，每个关键词最多取 3 个候选，最多临时下载 8 张；候选按每批最多 3 张放入当天项目中的类型筛选聊天，降低 ChatGPT 附件额度消耗。只有同时通过类型、完整成品、金融相关和最低 60 分的图片才会正式进入 `references/`；结构和可用性作为软性参考信号。数字、`元`、`¥/$/%`、金币、优惠券、仪表盘、红包、利息或息费都算金融相关线索，失败临时文件会删除并记录审核原因。
-- 弹窗和 Banner 保留默认 720px 最低宽度，Banner 继续要求宽高比至少 1.5；浮窗不使用正常宽度或高宽比门槛，但必须有真实透明留白。模糊标题、文件名和 `IMG_*` 不再直接淘汰，都会进入看图审核。
-- `reference-history.json` 长期记录已采集 Pin 和图片指纹；后续运行会跳过历史 Pin 和相同图片并继续滚动检索，不会误删仅仅版式相似的素材。
+- 弹窗和 Banner 保留默认 720px 最低宽度，Banner 继续要求宽高比至少 1.5；浮窗不使用宽度、高宽比或 Alpha 门槛，只要是可识别的金融单元素或元素加按钮即可进入看图审核。模糊标题、文件名和 `IMG_*` 不再直接淘汰。
+- `reference-history.json` 长期记录已采集的花瓣 Pin，并通过图片指纹排除同一图片。
 - Figma 左侧始终是完整预览，右侧必须是可见的可编辑重建，禁止左右两边显示同一张扁平图。
 
 ### 环境要求
@@ -88,7 +90,7 @@ npm run setup
 
 登录设置、测试、正式、定时和断点恢复运行均使用带持久化配置的可见专用 Chrome。花瓣会对无头浏览器返回 `405`，而 macOS 后台启动方式不能稳定复用 ChatGPT 登录会话，因此默认不再隐藏或最小化窗口。遇到验证码、安全验证或权限确认时会停止并通知用户，流水线不会绕过安全限制。
 
-每次工作流最多启动一次专用 Chrome，并在启动阶段一次性准备花瓣、Pin 详情和 ChatGPT 标签页。所有方向和重试均复用该浏览器会话；单实例锁会阻止重复调度再次打开窗口，浏览器异常时任务直接停止而不会自动重启。
+每次工作流最多启动一次专用 Chrome，并在启动阶段一次性准备选定来源的搜索页、Pin 详情页和 ChatGPT 标签页。所有方向和重试均复用该浏览器会话。
 
 先运行小规模测试：
 
@@ -131,6 +133,7 @@ codex plugin add finance-creative-pipeline@<marketplace-name>
 | `browser.mode` | 浏览器模式，默认 `visible`；`background` 和 `headless` 仅保留用于诊断 |
 | `figma.fileKey` | 目标 Figma 文件 key |
 | `figma.pageId` | 目标 Figma 页面 ID |
+| `collection.source` | 采集来源固定为 `huaban` |
 | `collection.referenceCount` | 正式运行采集的参考图数量 |
 | `collection.minReferenceWidthPx` | 弹窗和 Banner 详情图的最低像素宽度，默认 720；浮窗不使用此门槛 |
 | `collection.maxScannedCandidatesPerDirection` | 每个缺失方向最多浏览的 Pin 数，默认 30 |
@@ -151,7 +154,7 @@ codex plugin add finance-creative-pipeline@<marketplace-name>
 | `generation.decompositionMaxAttempts` | 第 8 步语义分层总尝试次数，默认 2 |
 | `chatgpt.dailyProjects` | 是否每天创建或复用一个 ChatGPT 日期项目，默认开启 |
 | `chatgpt.projectNamePrefix` | 日期项目前缀，默认 `金融运营素材` |
-| `transparentAssets.maxAssets` | 单方向最多拆出的复杂视觉素材数，默认 4 |
+| `transparentAssets.maxAssets` | 单方向最多拆出的复杂视觉素材数，默认 8 |
 | `transparentAssets.timeoutMinutes` | 第 9 步每个独立素材单次等待上限，默认 5 分钟 |
 | `transparentAssets.maxAttempts` | 第 9 步每个独立素材总尝试次数，默认 2 |
 | `transparentAssets.minForegroundRatio` | 单素材最小前景占比 |
@@ -210,7 +213,7 @@ YYYY-MM-DD/
 - `spec.json`：方向构图、配色、组件和文案。
 - `layers.json`：ChatGPT 输出的语义图层计划。
 - `decomposition-report.json`：每个独立素材的 Alpha、边界质量、警告和限制。
-- `layers/*.png`：ChatGPT 分别生成并通过质量检查的独立透明素材。
+- `layers/*.png`：从完整预览源像素提取并通过质量检查的独立透明素材。
 
 ### Figma 交付规范
 
@@ -219,7 +222,7 @@ YYYY-MM-DD/
 - `Preview`：左侧完整预览图。
 - `Editable`：右侧可见的可编辑重建。
 - `Visual Base`：锁定但隐藏，只作为核对参考，不能作为右侧可见交付。
-- `Editable Elements`：通过检查的 ChatGPT 透明素材、原生文字、卡片、按钮和简单几何图层；Banner 和浮窗可包含自身背景。
+- `Editable Elements`：通过检查的源像素透明素材、原生文字、卡片、按钮和简单几何图层；Banner 和浮窗可包含自身背景。
 
 弹窗右侧画布保持透明，只重构弹窗卡片、阴影、贴附主视觉和卡内元素，不还原弹窗后方的页面界面。Banner 和浮窗没有清底背景时，可使用 `spec.json.palette` 的第一个颜色作为原生背景。Figma 完成前必须逐方向截图，并检查：
 
@@ -264,7 +267,7 @@ npm run check          # 运行语法检查和自动化测试
 
 Finance Creative Pipeline is a Codex plugin for daily Chinese internet-finance operations creatives. It runs a resumable local workflow that:
 
-1. Collects higher-resolution visible references from Huaban Pin detail pages through a persistent Chrome profile, preserving source URLs and dimensions.
+1. Collects higher-resolution visible references from Huaban through a persistent Chrome profile, preserving source URLs and dimensions.
 2. Uses ChatGPT Web to analyze the references and generate one brand-neutral, complete preview per direction.
 3. Creates or reuses one dated project per day and keeps preview generation, decomposition, and transparent-asset extraction for each direction in one project chat.
 4. Sends each preview back in the same chat to identify complex visual elements and produce a semantic `layers.json` plan.
@@ -278,19 +281,21 @@ A normal run collects 10 references and generates 10 original directions: six po
 - Image generation must use ChatGPT Web. Codex image generation is not a fallback.
 - Generate exactly one complete preview; never combine multiple extracted assets into one sheet or image.
 - Popup directions generate only the popup body with a clean outer safety margin. They must not generate an App page, search bar, navigation, bottom tabs, page cards, or a blurred interface background.
-- Only complex hero visuals, 3D objects, people, mascots, and non-reconstructable illustrations become PNG assets. Cards, buttons, ordinary icons, charts, and simple decorations stay native in Figma.
+- Use an 80% native-fidelity threshold: complex hero visuals, 3D objects, people, mascots, gradient folds, embossed badges, envelope shells, and non-reconstructable illustrations below the threshold become separate PNG assets. Truly simple cards, buttons, ordinary icons, charts, and decorations stay native in Figma.
 - Match ordinary functional icons against official [Remix Icon](https://remixicon.com/) SVGs first and import them as editable Figma vectors instead of hand-drawing temporary icons or using generic placeholders.
-- ChatGPT must extract each selected element separately while preserving its original shape, proportions, color, lighting, and details; no Apple Vision or downloaded local matting model is used.
+- References provide layout, color, material, and element-category inspiration only. Generated work must stay at roughly 60% similarity or less, substantially change at least three design axes, and use a new campaign scenario, benefit, and sentence structure.
+- Transparent assets are extracted from final-preview source pixels with local background matting instead of being redrawn by ChatGPT. Visually connected hero objects stay grouped as one asset.
 - Local processing only trims transparent margins and validates Alpha and image boundaries.
 - Opaque, colored-background, empty, or boundary-touching assets are rejected and never uploaded to Figma.
 - Each run date uses one ChatGPT project named `金融运营素材 YYYY-MM-DD`. The `采集筛选-弹窗/Banner/浮窗` content-audit chats and every direction-generation chat stay inside that dated project. Each design direction still uses exactly one chat for analysis, generation, decomposition, and transparent assets.
 - Project chats are explicitly renamed with type-local numbering: `弹窗1`–`弹窗6`, `Banner1`–`Banner2`, and `浮窗1`–`浮窗2`. Isolated validation runs start each included type at 1 instead of using the global direction index.
 - Reference images use ChatGPT's image-specific upload input. The analysis prompt is sent only after every expected filename, image thumbnail, and send-ready state is verified. If ChatGPT reports missing images, the composer is cleared and all references are uploaded again instead of continuing without visual references.
 - Resume from `run.json` and `figma-manifest.json` to avoid duplicate collection, generation, or dated Figma sections.
-- Collect popup, Banner, and floating references from separate type-matched keyword pools. Queries establish discovery direction, technical checks enforce dimensions and Alpha, and ChatGPT Web makes the final decision from actual image content. Titles only hard-reject candidates that explicitly describe backgrounds, buttons, atomic elements, templates, full pages, or unrelated industries.
+- Use Huaban as the sole reference provider for every run.
+- Collect popup, Banner, and floating references from separate type-matched keyword pools. Queries establish discovery direction, technical checks enforce dimensions where applicable, and ChatGPT Web makes the final decision from actual image content. Floating references may be standalone finance 3D assets, illustrations, red envelopes, coins, badges, or an asset-plus-button composition. Titles only hard-reject candidates that explicitly describe backgrounds, templates, full pages, or unrelated industries.
 - For each missing direction, scan up to 30 unseen Pins, rotate after at most three candidates per query, and temporarily download up to eight images. Review up to three attachments per batch in the dated project's type-specific audit chat to reduce attachment quota consumption. Accept only images that pass type match, complete-design, finance relevance, and the default score threshold of 60; treat structure and usability as soft signals. Arabic numerals, `元`, `¥/$/%`, coins, coupons, dashboards, red envelopes, and interest or fee wording all count as finance-relevant signals, then delete rejected temporary files after recording the evidence.
-- Popup and Banner references retain the 720 px minimum-width gate, and Banners retain an aspect ratio of at least 1.5. Floating references have no normal width or aspect-ratio gate but require genuine transparent margin. Ambiguous titles, filenames, and `IMG_*` labels proceed to image-content review instead of being rejected.
-- Keep accepted Pin IDs and image fingerprints in `reference-history.json`; later runs skip historical Pins and identical images and continue scrolling, without rejecting merely similar layouts.
+- Popup and Banner references retain the 720 px minimum-width gate, and Banners retain an aspect ratio of at least 1.5. Floating references have no width, aspect-ratio, or Alpha gate at collection time; opaque standalone subjects proceed to later ChatGPT transparent extraction. Ambiguous titles, filenames, and `IMG_*` labels proceed to image-content review instead of being rejected.
+- Keep Huaban Pin IDs and image fingerprints in `reference-history.json` to avoid collecting the same image again.
 - The Figma preview stays on the left. The right side must visibly render editable layers and must never duplicate the same flattened image.
 
 ### Requirements
@@ -332,7 +337,7 @@ npm run setup
 
 Login setup, tests, normal runs, scheduled runs, and resumed runs all use a visible dedicated Chrome with the persistent profile. Huaban returns HTTP 405 to headless Chrome, while the macOS background-launch mode does not reliably preserve the ChatGPT authenticated session, so the window is no longer hidden or minimized by default. CAPTCHA, security checks, and permission prompts stop the run and require user action; they are never bypassed.
 
-Each workflow starts the dedicated Chrome at most once and prepares the Huaban, Pin-detail, and ChatGPT tabs together during startup. Every direction and retry reuses that browser session. A global single-run lock prevents duplicate schedules from opening another window, and a browser failure stops the run instead of relaunching Chrome.
+Each workflow starts the dedicated Chrome at most once and prepares the selected source search, Pin-detail, and ChatGPT tabs together. Every direction and retry reuses that browser session.
 
 Run the small test first:
 
@@ -369,6 +374,7 @@ User configuration lives outside the repository and should never be committed:
 | `browser.mode` | Browser mode; defaults to `visible`, while `background` and `headless` remain diagnostic-only alternatives |
 | `figma.fileKey` | Target Figma file key |
 | `figma.pageId` | Target Figma page ID |
+| `collection.source` | Collection provider, fixed as `huaban` |
 | `collection.referenceCount` | Number of references in a normal run |
 | `collection.minReferenceWidthPx` | Minimum detail-image width for popup and Banner references; defaults to 720 and does not apply to floats |
 | `collection.maxScannedCandidatesPerDirection` | Maximum Pins browsed per missing direction; defaults to 30 |
@@ -457,7 +463,7 @@ Each direction uses a side-by-side layout:
 - `Preview`: complete flattened preview on the left.
 - `Editable`: visible editable reconstruction on the right.
 - `Visual Base`: locked and hidden reference only; it must not be used as the visible right-side delivery.
-- `Editable Elements`: accepted ChatGPT-separated transparent assets plus native text, cards, buttons, and simple geometry; Banner and float directions may include their own backgrounds.
+- `Editable Elements`: accepted source-pixel transparent assets plus native text, cards, buttons, and simple geometry; Banner and float directions may include their own backgrounds.
 
 Popup editable canvases stay transparent and reconstruct only the popup card, shadow, attached hero, and internal elements; the page behind the popup is never rebuilt. Banner and float directions may use the first color in `spec.json.palette` when no cleaned background exists. Before completion, screenshot every direction and verify:
 

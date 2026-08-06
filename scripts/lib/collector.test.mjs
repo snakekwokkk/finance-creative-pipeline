@@ -12,7 +12,10 @@ import {
   isSameImage,
   looksLikeBlockedPage,
   minimumReferenceWidth,
+  normalizeReferenceProvider,
   referenceCollectionRequiresUserAction,
+  referenceIdentityKey,
+  referenceProvider,
   selectAvailableReferencesForPlans,
   selectReferencesForPlans
 } from "./collector.mjs";
@@ -30,6 +33,13 @@ test("normal Huaban collection counts do not look like HTTP 405 blockers", () =>
   assert.equal(looksLikeBlockedPage("请完成行为验证后继续访问"), true);
 });
 
+test("reference collection is limited to Huaban", () => {
+  assert.equal(normalizeReferenceProvider("huaban"), "huaban");
+  assert.throws(() => normalizeReferenceProvider("other"), /仅支持 huaban/);
+  assert.equal(referenceProvider({ sourceUrl: "https://huaban.com/pins/123456" }), "huaban");
+  assert.equal(referenceIdentityKey({ pinId: "123456" }), "huaban:123456");
+});
+
 test("default search plan preserves type quotas", () => {
   const plans = buildSearchPlans({}, 10, "2026-08-04");
   assert.deepEqual(plans.map(({ type, count }) => ({ type, count })), [
@@ -42,7 +52,7 @@ test("default search plan preserves type quotas", () => {
   assert.ok(plans[1].keywords.every((keyword) => /金融|理财|投资|基金|证券/.test(keyword)));
   assert.ok(plans[1].keywords.includes("金融banner"));
   assert.ok(plans[1].keywords.every((keyword) => !/弹窗|浮窗|悬浮|浮标/.test(keyword)));
-  assert.ok(plans[2].keywords.every((keyword) => /浮窗|悬浮|浮标|入口|挂件|贴片/.test(keyword)));
+  assert.ok(plans[2].keywords.every((keyword) => /浮窗|悬浮|浮标|入口|挂件|3D素材|插图素材/.test(keyword)));
   assert.ok(plans[2].keywords.every((keyword) => /金融|借款|贷款|理财|借贷/.test(keyword)));
 });
 
@@ -65,7 +75,7 @@ test("three-type validation uses one reference from each matching keyword pool",
   assert.ok(plans[1].keywords.every((keyword) => /金融|理财|投资|基金|证券/.test(keyword)));
   assert.ok(plans[1].keywords.includes("金融banner"));
   assert.ok(plans[1].keywords.every((keyword) => !/弹窗|浮窗|悬浮|浮标/.test(keyword)));
-  assert.ok(plans[2].keywords.every((keyword) => /浮窗|悬浮|浮标|入口|挂件|贴片/.test(keyword)));
+  assert.ok(plans[2].keywords.every((keyword) => /浮窗|悬浮|浮标|入口|挂件|3D素材|插图素材/.test(keyword)));
   assert.ok(plans[2].keywords.every((keyword) => /金融|借款|贷款|理财|借贷/.test(keyword)));
 });
 
@@ -103,14 +113,14 @@ test("float references do not inherit the normal minimum-width gate", () => {
   assert.equal(minimumReferenceWidth("banner", 720), 720);
 });
 
-test("float titles require a complete finance operations entry and reject obvious unrelated assets", () => {
+test("float titles allow standalone finance elements and reject obvious unrelated assets", () => {
   assert.equal(assessReferenceTitle("float", "金融新客福利活动浮窗").accepted, true);
   assert.equal(assessReferenceTitle("float", "借款红包活动入口").accepted, true);
   assert.equal(assessReferenceTitle("float", "商品零售按钮文字贴纸素材").accepted, false);
   assert.equal(assessReferenceTitle("float", "常规背景系列蓝白色渐变弥散背景").accepted, false);
-  assert.equal(assessReferenceTitle("float", "蓝紫色渐变长条形立体按钮元素").accepted, false);
-  assert.equal(assessReferenceTitle("float", "金融活动浮窗按钮素材").accepted, false);
-  assert.equal(assessReferenceTitle("float", "金融活动贴片文字贴纸").accepted, false);
+  assert.equal(assessReferenceTitle("float", "蓝紫色渐变长条形立体按钮元素", "金融 悬浮球").accepted, true);
+  assert.equal(assessReferenceTitle("float", "金融活动浮窗按钮素材").accepted, true);
+  assert.equal(assessReferenceTitle("float", "金融活动贴片文字贴纸").accepted, true);
   assert.equal(assessReferenceTitle("float", "金融 App 完整页面界面").accepted, false);
   assert.equal(assessReferenceTitle("float", "限时红包福利", "借款 福利浮窗").accepted, true);
   assert.equal(assessReferenceTitle("float", "限时抢购活动贴片", "金融 运营贴片").accepted, true);
@@ -157,7 +167,7 @@ test("banner visual audit keeps horizontal width semantics", async () => {
   assert.equal((await assessBannerReferenceVisual(square)).accepted, false);
 });
 
-test("float visual audit accepts small transparent subjects and rejects opaque backgrounds", async () => {
+test("float visual audit accepts transparent and opaque standalone subjects", async () => {
   const smallFloat = await sharp({
     create: { width: 120, height: 120, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } }
   }).composite([{ input: await sharp({
@@ -167,7 +177,8 @@ test("float visual audit accepts small transparent subjects and rejects opaque b
     create: { width: 300, height: 500, channels: 3, background: { r: 180, g: 210, b: 255 } }
   }).jpeg().toBuffer();
   assert.equal((await assessFloatReferenceVisual(smallFloat)).accepted, true);
-  assert.equal((await assessFloatReferenceVisual(background)).accepted, false);
+  assert.equal((await assessFloatReferenceVisual(background)).accepted, true);
+  assert.equal((await assessFloatReferenceVisual(background)).needsExtraction, true);
 });
 
 test("duplicate detection rejects only the same image", () => {

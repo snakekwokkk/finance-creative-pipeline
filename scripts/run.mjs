@@ -21,6 +21,7 @@ const testMode = process.argv.includes("--test");
 const scheduledMode = process.argv.includes("--scheduled");
 const visibleMode = process.argv.includes("--visible");
 const collectionOnly = process.argv.includes("--collection-only");
+if (process.argv.includes("--source")) throw new Error("采图来源固定为花瓣，不再支持 --source 参数");
 const typesIndex = process.argv.indexOf("--types");
 const requestedTypes = typesIndex >= 0
   ? String(process.argv[typesIndex + 1] || "").split(",").map((item) => item.trim().toLowerCase()).filter(Boolean)
@@ -34,6 +35,7 @@ if (collectionOnly && requestedTypes.length === 0) {
 }
 const validationMode = requestedTypes.length > 0;
 const config = await ensureConfig();
+const sourceProvider = "huaban";
 await fs.mkdir(config.outputRoot, { recursive: true });
 const date = localDate(config.timezone);
 const runName = validationMode
@@ -59,22 +61,27 @@ await ensureRun(runFile, date, testMode || validationMode);
 
 const referenceCount = validationMode ? requestedTypes.length : testMode ? 1 : config.collection.referenceCount;
 const directionCount = validationMode ? requestedTypes.length : testMode ? 1 : config.generation.directionCount;
+const validationSearchPlans = validationMode
+  ? buildSearchPlansForTypes(config.collection, requestedTypes, 1, sourceProvider)
+  : null;
 const runConfig = validationMode
   ? {
       ...config,
       collection: {
         ...config.collection,
-        searchPlans: buildSearchPlansForTypes(config.collection, requestedTypes)
+        source: sourceProvider,
+        searchPlans: validationSearchPlans
       },
       generation: { ...config.generation, directionCount }
     }
-  : config;
+  : { ...config, collection: { ...config.collection, source: sourceProvider } };
 let workflowLock;
 try {
   workflowLock = await acquireWorkflowLock(path.join(appSupportDir, "workflow.lock"), {
     runName,
     runDir,
-    mode: collectionOnly ? "collection-only" : validationMode ? "validation" : testMode ? "test" : scheduledMode ? "scheduled" : "normal"
+    mode: collectionOnly ? "collection-only" : validationMode ? "validation" : testMode ? "test" : scheduledMode ? "scheduled" : "normal",
+    sourceProvider
   });
 } catch (error) {
   await notify("金融运营素材流水线未启动", error.message);
@@ -100,13 +107,16 @@ try {
     await context.close().catch(() => {});
     throw workflowAbortedError();
   }
-  const huaban = await findOrOpenPage(context, "https://huaban.com", "https://huaban.com/discovery");
+  const sourceHome = "https://huaban.com/discovery";
+  const sourcePrefix = "https://huaban.com";
+  const sourcePage = await findOrOpenPage(context, sourcePrefix, sourceHome);
   const chatgpt = await findOrOpenPage(context, "https://chatgpt.com", "https://chatgpt.com/");
-  const huabanDetail = await context.newPage();
+  const sourceDetail = await context.newPage();
   const browserSession = {
     pid: process.pid,
     launchCount: 1,
     windowCount: 1,
+    sourceProvider,
     startedAt: new Date().toISOString()
   };
   console.log(JSON.stringify({ event: "browser_session_started", ...browserSession }));
@@ -118,8 +128,8 @@ try {
   await updateRun(runFile, { chatgptProject });
   const references = await collectReferences({
     context,
-    page: huaban,
-    detailPage: huabanDetail,
+    page: sourcePage,
+    detailPage: sourceDetail,
     config: runConfig,
     runDir,
     date,

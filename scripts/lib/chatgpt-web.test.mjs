@@ -22,8 +22,12 @@ import {
   enqueueAnalysisFinalRetry,
   directionProcessingOrder,
   directionChatTitle,
+  directionChatBootstrapPrompt,
+  promptSubmissionObserved,
   previewPrompt,
   parseReferenceAudit,
+  originalityAuditPrompt,
+  parseOriginalityAudit,
   projectBaseUrl,
   readyDirectionsForFigma,
   referenceAuditChatTitle,
@@ -64,10 +68,10 @@ test("reference uploads are accepted only after every image attachment is visibl
   }).ready, true);
   assert.equal(attachmentDeliveryStatus({
     files,
-    removalLabels: [],
-    imageCount: 0,
+    removalLabels: ["移除附件"],
+    imageCount: 1,
     sendEnabled: true
-  }).ready, false);
+  }).ready, true);
   assert.equal(attachmentDeliveryStatus({
     files,
     removalLabels: ["Remove file 1: 01-popup.webp"],
@@ -133,6 +137,32 @@ test("direction chats use type-local numbering instead of global direction numbe
   assert.throws(() => directionChatTitle("unknown", 0), /不支持的方向类型/);
 });
 
+test("new direction chats are bootstrapped before image upload", () => {
+  const prompt = directionChatBootstrapPrompt();
+  assert.match(prompt, /只回复 READY/);
+  assert.match(prompt, /本条不要分析、不要生成图片/);
+});
+
+test("prompt submission requires observable composer, message, or URL evidence", () => {
+  const projectUrl = "https://chatgpt.com/g/g-p-abc/project";
+  assert.equal(promptSubmissionObserved({
+    beforeUserCount: 2,
+    afterUserCount: 2,
+    beforeUrl: projectUrl,
+    afterUrl: projectUrl,
+    composerText: "still pending"
+  }), false);
+  assert.equal(promptSubmissionObserved({
+    beforeUserCount: 2,
+    afterUserCount: 2,
+    beforeUrl: projectUrl,
+    afterUrl: "https://chatgpt.com/g/g-p-abc/c/new-chat",
+    composerText: "still pending"
+  }), true);
+  assert.equal(promptSubmissionObserved({ beforeUserCount: 2, afterUserCount: 3, composerText: "" }), true);
+  assert.equal(promptSubmissionObserved({ beforeUserCount: 2, afterUserCount: 2, composerText: "" }), true);
+});
+
 test("reference content audits live in dated-project chats and rely on image content", () => {
   assert.equal(referenceAuditChatTitle("popup"), "采集筛选-弹窗");
   assert.equal(referenceAuditChatTitle("banner"), "采集筛选-Banner");
@@ -147,6 +177,10 @@ test("reference content audits live in dated-project chats and rely on image con
   assert.match(prompt, /阿拉伯数字、汉字“元”、¥、\$、%、金币、优惠券、仪表盘、红包、利息\/息费/);
   assert.doesNotMatch(prompt, /真实品牌Logo、二维码、其他行业、夸大金融承诺/);
   assert.match(prompt, /candidate-p1\.webp/);
+
+  const floatPrompt = referenceAuditPrompt("float", candidates);
+  assert.match(floatPrompt, /3D素材/);
+  assert.match(floatPrompt, /主体本身完整可提取/);
 
   const parsed = parseReferenceAudit(`REFERENCE_AUDIT_START
 {"candidates":[{"pinId":"p1","filename":"candidate-p1.webp","typeMatch":true,"completeDesign":true,"financeRelevant":true,"structureValid":true,"usableReference":true,"score":88,"reasons":["完整金融弹窗"]},{"pinId":"p2","filename":"candidate-p2.webp","typeMatch":false,"completeDesign":false,"financeRelevant":false,"structureValid":false,"usableReference":false,"score":20,"reasons":["只是原子元素"]}]}
@@ -171,6 +205,10 @@ test("popup prompts generate and decompose only the popup body", () => {
   assert.match(specPrompt, /不要把参考图中的 App 页面/);
   assert.match(imagePrompt, /弹窗素材，不是完整 App 页面/);
   assert.match(imagePrompt, /不生成或暗示 App 页面/);
+  assert.match(specPrompt, /整体视觉相似度上限约为 60%/);
+  assert.match(specPrompt, /至少在构图、主视觉、信息结构、装饰形态中选择三项做实质变化/);
+  assert.match(imagePrompt, /整体视觉相似度必须控制在约 60% 以内/);
+  assert.match(imagePrompt, /不能只改数字或换同义词/);
   assert.match(layersPrompt, /只输出属于弹窗本体的图层/);
   assert.match(layersPrompt, /不得创建 Background\/AppInterface/);
   assert.doesNotMatch(layersPrompt, /"id":"background"/);
@@ -179,10 +217,9 @@ test("popup prompts generate and decompose only the popup body", () => {
 test("decomposition records searchable Remix Icon semantics instead of invented paths", () => {
   const layersPrompt = decompositionPrompt(7, 1140, 240, 4, "banner");
   assert.match(layersPrompt, /每个普通功能图标使用kind=icon/);
-  assert.match(layersPrompt, /query用2到4个简短英文词/);
-  assert.match(layersPrompt, /"query":"shield check"/);
-  assert.match(layersPrompt, /"style":"line"/);
-  assert.match(layersPrompt, /不要臆造图标库文件名/);
+  assert.match(layersPrompt, /nativeFidelity < 0\.8/);
+  assert.match(layersPrompt, /共同构成一个主视觉的复杂对象必须合并为一个 raster 组/);
+  assert.match(layersPrompt, /不要把同一主视觉拆成多个会错位的零件/);
 });
 
 test("decomposition asks ChatGPT to keep machine JSON visually compact", () => {
@@ -193,6 +230,24 @@ test("decomposition asks ChatGPT to keep machine JSON visually compact", () => {
   assert.match(layersPrompt, /JSON内部不得换行或缩进/);
   assert.doesNotMatch(marked[1], /\n/);
   assert.equal(JSON.parse(marked[1]).canvas.width, 1140);
+});
+
+test("originality audit enforces the 60 percent ceiling and three changed axes", () => {
+  const prompt = originalityAuditPrompt("reference.webp", "preview.png");
+  assert.match(prompt, /similarityScore <= 60/);
+  assert.match(prompt, /changedAxes 至少3项/);
+  const accepted = parseOriginalityAudit(`ORIGINALITY_AUDIT_START
+{"similarityScore":58,"changedAxes":["composition","hero","copy"],"copiedTextFragments":[],"pass":true,"reasons":[]}
+ORIGINALITY_AUDIT_END`);
+  assert.equal(accepted.pass, true);
+  const tooSimilar = parseOriginalityAudit(`ORIGINALITY_AUDIT_START
+{"similarityScore":78,"changedAxes":["composition","hero","copy"],"copiedTextFragments":[],"pass":true,"reasons":[]}
+ORIGINALITY_AUDIT_END`);
+  assert.equal(tooSimilar.pass, false);
+  const copiedText = parseOriginalityAudit(`ORIGINALITY_AUDIT_START
+{"similarityScore":50,"changedAxes":["composition","hero","copy"],"copiedTextFragments":["稳健规划"],"pass":true,"reasons":[]}
+ORIGINALITY_AUDIT_END`);
+  assert.equal(copiedText.pass, false);
 });
 
 test("each direction receives one reference from its matching creative type", () => {
@@ -343,20 +398,25 @@ test("Figma handoff includes only ready directions with complete local artifacts
     .png({ compressionLevel: 0 })
     .toFile(previewFile);
   await fs.writeFile(layersFile, JSON.stringify({ schemaVersion: 4, layers: [{ id: "title", editable: "text" }] }));
-  await fs.writeFile(decompositionReport, JSON.stringify({ schemaVersion: 4, status: "ready", layers: [] }));
+  await fs.writeFile(decompositionReport, JSON.stringify({
+    schemaVersion: 4,
+    status: "ready",
+    transparentAssets: { engine: "native-source-pixel-matting" },
+    layers: []
+  }));
   const complete = { index: 1, status: "ready", previewFile, layersFile, decompositionReport };
   const incomplete = { index: 2, status: "ready", previewFile: path.join(root, "missing.png"), layersFile, decompositionReport };
   assert.deepEqual((await readyDirectionsForFigma({ directions: [complete, incomplete] })).map((item) => item.index), [1]);
 });
 
-test("separate asset prompts stay short and require fidelity plus transparency", () => {
+test("separate asset prompts require fidelity plus transparency", () => {
   const layer = { id: "hero", role: "Visual/Hero", assetPrompt: "完整主视觉" };
   const prompt = separateAssetPrompt(layer);
   assert.match(prompt, /完整主视觉/);
-  assert.match(prompt, /与原图一致/);
+  assert.match(prompt, /保持原始造型/);
   assert.match(prompt, /透明背景高清 PNG/);
-  assert.ok(prompt.length < 180);
+  assert.match(prompt, /重新上传的完整预览图/);
   const correction = separateAssetCorrectionPrompt(layer, "主体触碰边界");
-  assert.match(correction, /重新从原图单独提取/);
+  assert.match(correction, /重新查看刚刚重新上传的完整预览图/);
   assert.match(correction, /主体触碰边界/);
 });

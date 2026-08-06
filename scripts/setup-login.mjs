@@ -5,11 +5,12 @@ import { launchPersistentBrowser } from "./lib/browser.mjs";
 import { ensureChatGptLoggedIn } from "./lib/chatgpt-web.mjs";
 
 const config = await ensureConfig();
+if (process.argv.includes("--source")) throw new Error("采图来源固定为花瓣，不再支持 --source 参数");
 const context = await launchPersistentBrowser(config, { forceVisible: true });
-const huaban = await context.newPage();
+const sourcePage = await context.newPage();
 const chatgpt = await context.newPage();
 await Promise.all([
-  huaban.goto("https://huaban.com/discovery", { waitUntil: "domcontentloaded", timeout: 60_000 }),
+  sourcePage.goto("https://huaban.com/discovery", { waitUntil: "domcontentloaded", timeout: 60_000 }),
   chatgpt.goto("https://chatgpt.com/", { waitUntil: "domcontentloaded", timeout: 60_000 })
 ]);
 
@@ -20,8 +21,8 @@ while (true) {
     await ensureChatGptLoggedIn(chatgpt);
     break;
   } catch (error) {
-    console.log(`ChatGPT 登录尚未通过验证：${error.message}`);
-    console.log("请切换到专用 Chrome 的 ChatGPT 标签页完成登录，确认页面不再显示“登录”按钮后重试。");
+    console.log(`登录尚未通过验证：${error.message}`);
+    console.log("请切换到专用 Chrome 的花瓣或 ChatGPT 标签页完成登录后重试。");
   }
 }
 rl.close();

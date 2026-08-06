@@ -7,11 +7,30 @@ import sharp from "sharp";
 import {
   TRANSPARENT_ASSET_ENGINE,
   assignAssetIndices,
+  boxToPixels,
   recoverAcceptedAsset,
   reportAssetsReady,
   validateSeparateAsset,
   writeDecompositionReport
 } from "./transparent-assets.mjs";
+
+test("normalized corner bboxes map to source pixels", () => {
+  assert.deepEqual(boxToPixels([0.2, 0.1, 0.7, 0.4], 1000, 1200), {
+    left: 200,
+    top: 120,
+    width: 500,
+    height: 360
+  });
+});
+
+test("normalized x-y-width-height bboxes remain supported", () => {
+  assert.deepEqual(boxToPixels([0.7, 0.3, 0.2, 0.1], 1000, 1200), {
+    left: 700,
+    top: 360,
+    width: 200,
+    height: 120
+  });
+});
 
 function plan() {
   return assignAssetIndices({
@@ -29,6 +48,7 @@ test("complex raster assets receive deterministic separate indices", () => {
   const assigned = plan();
   assert.equal(assigned.schemaVersion, 4);
   assert.equal(assigned.transparentAssets.engine, TRANSPARENT_ASSET_ENGINE);
+  assert.equal(TRANSPARENT_ASSET_ENGINE, "native-source-pixel-matting");
   assert.deepEqual(assigned.transparentAssets.layerIds, ["hero"]);
   assert.equal(assigned.layers.find((layer) => layer.id === "hero").assetIndex, 0);
 });
@@ -55,6 +75,7 @@ test("a true transparent image is trimmed and accepted as one independent file",
   const report = await writeDecompositionReport({ plan: assigned, sourceImage, outputDir, assetResults: new Map([["hero", result]]) });
   assert.equal(report.status, "ready");
   assert.equal(report.layers.find((item) => item.id === "hero").assetPlacement.fit, "contain");
+  assert.equal(report.layers.find((item) => item.id === "hero").extractionMode, "native-source-pixel-asset");
   assert.ok(await reportAssetsReady(report));
 });
 

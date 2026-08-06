@@ -5,7 +5,7 @@ import sharp from "sharp";
 import { readJson, writeJsonAtomic } from "./state.mjs";
 import { screenshotFailure } from "./browser.mjs";
 
-const CSV_HEADER = "index,pin_id,reference_type,title,source_url,list_image_url,image_url,width,height,file_size,search_keyword,collected_at,sha256,ahash\n";
+const CSV_HEADER = "index,pin_id,reference_type,title,source_url,list_image_url,image_url,width,height,file_size,search_keyword,collected_at,sha256,ahash,provider\n";
 const HISTORY_FILE = "reference-history.json";
 const REJECTIONS_FILE = "reference-rejections.json";
 const POPUP_FORM_PATTERN = /弹窗|弹框|模态|对话框|浮层|遮罩/i;
@@ -17,7 +17,7 @@ const BANNER_CONTEXT_PATTERN = /金融|借款|贷款|助贷|理财|投资|基金
 const BANNER_BLOCKED_PATTERN = /教育|培训|教资|餐饮|美食|地产|房产|家装|医美|美容|旅游|婚庆|招聘|汽车|游戏|电商|零售|商品|背景|底图|纹理|壁纸|边框|框架|按钮|贴纸|字体|字效|图标|icon|logo|元素|素材包|样机|模板/i;
 const FLOAT_FORM_PATTERN = /浮窗|悬浮窗|浮标|活动入口|福利入口|红包入口|悬浮入口|运营挂件|活动挂件|侧边挂件|运营贴片|活动贴片/i;
 const FLOAT_CONTEXT_PATTERN = /金融|借款|贷款|助贷|理财|投资|基金|证券|红包|福利|优惠|领券|新客|会员|任务|奖励|活动|营销/i;
-const FLOAT_BLOCKED_PATTERN = /背景|底图|纹理|壁纸|弥散|边框|框架|普通按钮|按钮素材|按钮文字|按钮元素|立体按钮|长条按钮|文字贴纸|贴纸素材|文字素材|字体|字效|图标素材|icon|logo|banner|横幅|海报|主视觉|(?:完整|手机|网页|app).*(?:页面|界面)|导航|菜单/i;
+const FLOAT_BLOCKED_PATTERN = /背景|底图|纹理|壁纸|弥散|边框|框架|banner|横幅|海报|商品|零售|餐饮|美食|教育|培训|地产|医美|旅游|婚庆|招聘|汽车|游戏|(?:完整|手机|网页|app).*(?:页面|界面)|导航|菜单/i;
 const DEFAULT_SEARCH_PLANS = [
   {
     type: "popup",
@@ -40,11 +40,33 @@ const DEFAULT_SEARCH_PLANS = [
     count: 2,
     keywords: [
       "金融 活动浮窗", "借款 福利浮窗", "贷款 红包浮窗", "理财 活动浮标",
-      "金融 福利入口", "金融 悬浮入口", "借贷 活动挂件", "金融 运营浮标",
-      "金融 运营贴片", "借款 活动贴片"
+      "金融 权益入口", "金融 悬浮球", "借款 红包挂件", "金融 会员浮标",
+      "金融 3D素材", "金融 插图素材"
     ]
   }
 ];
+
+export function normalizeReferenceProvider(value = "huaban") {
+  const provider = String(value || "huaban").trim().toLowerCase();
+  if (provider !== "huaban") throw new Error(`参考图来源仅支持 huaban，当前为 ${value}`);
+  return "huaban";
+}
+
+export function referenceProvider(item = {}) {
+  if (item.provider && String(item.provider).toLowerCase() !== "huaban") return "legacy";
+  return "huaban";
+}
+
+export function referenceIdentityKey(item = {}) {
+  const itemId = String(item.pinId || "").trim();
+  return itemId ? `${referenceProvider(item)}:${itemId}` : "";
+}
+
+function configuredSearchPlans(collection) {
+  return Array.isArray(collection.searchPlans) && collection.searchPlans.length
+    ? collection.searchPlans
+    : DEFAULT_SEARCH_PLANS;
+}
 
 function csvCell(value) {
   return `"${String(value ?? "").replaceAll('"', '""')}"`;
@@ -170,11 +192,16 @@ export async function assessFloatReferenceVisual(buffer) {
   if (!metadata.width || !metadata.height) {
     return { accepted: false, reasons: ["图片尺寸信息无效"], metrics: {} };
   }
+  // Floating references may be a single financial 3D/illustration element on
+  // a flat canvas. Alpha is preferred, but is not required at collection time;
+  // semantic review and the later transparent-asset extraction are responsible
+  // for deciding whether the subject is usable as a standalone float element.
   if (!metadata.hasAlpha) {
     return {
-      accepted: false,
-      reasons: ["图片没有透明留白，结构更像背景或完整页面而不是独立浮窗"],
-      metrics: { width: metadata.width, height: metadata.height, hasAlpha: false }
+      accepted: true,
+      needsExtraction: true,
+      reasons: ["图片没有 Alpha，将在生成阶段作为单元素参考并由 ChatGPT 提取主体"],
+      metrics: { width: metadata.width, height: metadata.height, hasAlpha: false, needsExtraction: true }
     };
   }
   const { data, info } = await image
@@ -207,9 +234,9 @@ export async function assessFloatReferenceVisual(buffer) {
     borderForegroundRatio: borderPixels ? borderForegroundPixels / borderPixels : 0
   };
   const reasons = [];
-  if (metrics.foregroundRatio < 0.015) reasons.push("透明画布中的有效主体过少");
-  if (metrics.clearRatio < 0.05) reasons.push("主体几乎铺满画布，缺少独立浮窗应有的透明留白");
-  if (metrics.borderForegroundRatio > 0.6) reasons.push("主体大面积触碰画布边缘，更像背景或完整页面");
+  if (metrics.foregroundRatio < 0.005) reasons.push("透明画布中的有效主体过少");
+  if (metrics.clearRatio < 0.015) reasons.push("主体几乎铺满画布，无法确认是独立元素");
+  if (metrics.borderForegroundRatio > 0.95) reasons.push("主体完全贴满画布，更像背景或完整页面");
   return { accepted: reasons.length === 0, reasons, metrics };
 }
 
@@ -227,9 +254,7 @@ function rotateForDate(values, date) {
 }
 
 export function buildSearchPlans(collection, count, date) {
-  const configured = Array.isArray(collection.searchPlans) && collection.searchPlans.length
-    ? collection.searchPlans
-    : DEFAULT_SEARCH_PLANS;
+  const configured = configuredSearchPlans(collection);
   let remaining = count;
   const plans = [];
   for (const plan of configured) {
@@ -245,9 +270,7 @@ export function buildSearchPlans(collection, count, date) {
 }
 
 export function buildSearchPlansForTypes(collection, types, countPerType = 1) {
-  const configured = Array.isArray(collection.searchPlans) && collection.searchPlans.length
-    ? collection.searchPlans
-    : DEFAULT_SEARCH_PLANS;
+  const configured = configuredSearchPlans(collection);
   return types.map((type) => {
     const plan = configured.find((item) => item.type === type);
     if (!plan?.keywords?.length) throw new Error(`配置中缺少 ${type} 类型的搜索词`);
@@ -282,6 +305,7 @@ export function collectionCandidateBudgets(requiredCount, existingCount = 0, col
 
 function historyRecord(item, date) {
   return {
+    provider: referenceProvider(item),
     pinId: item.pinId,
     ahash: item.ahash,
     sha256: item.sha256,
@@ -299,14 +323,15 @@ async function loadReferenceHistory(outputRoot) {
   const historyFile = path.join(outputRoot, HISTORY_FILE);
   const stored = await readJson(historyFile, { schemaVersion: 1, references: [] });
   const references = Array.isArray(stored.references) ? [...stored.references] : [];
-  const knownPins = new Set(references.map((item) => item.pinId).filter(Boolean));
+  const knownItems = new Set(references.map(referenceIdentityKey).filter(Boolean));
   let entries = [];
   try { entries = await fs.readdir(outputRoot, { withFileTypes: true }); } catch {}
   for (const entry of entries) {
     if (!entry.isDirectory() || !/^\d{4}-\d{2}-\d{2}$/.test(entry.name)) continue;
     const daily = await readJson(path.join(outputRoot, entry.name, "references.json"), []);
     for (const item of daily) {
-      if (!item.pinId || knownPins.has(item.pinId)) continue;
+      const itemKey = referenceIdentityKey(item);
+      if (!itemKey || knownItems.has(itemKey)) continue;
       let enriched = item;
       if ((!item.width || !item.height) && item.file) {
         try {
@@ -315,13 +340,13 @@ async function loadReferenceHistory(outputRoot) {
         } catch {}
       }
       references.push(historyRecord(enriched, entry.name));
-      knownPins.add(item.pinId);
+      knownItems.add(itemKey);
     }
   }
   const state = {
     file: historyFile,
     references,
-    pinIds: new Set(references.map((item) => item.pinId).filter(Boolean))
+    itemKeys: new Set(references.map(referenceIdentityKey).filter(Boolean))
   };
   await writeJsonAtomic(historyFile, { schemaVersion: 1, updatedAt: new Date().toISOString(), references });
   return state;
@@ -330,7 +355,7 @@ async function loadReferenceHistory(outputRoot) {
 async function appendReferenceHistory(history, item, date) {
   const record = historyRecord(item, date);
   history.references.push(record);
-  history.pinIds.add(record.pinId);
+  history.itemKeys.add(referenceIdentityKey(record));
   await writeJsonAtomic(history.file, {
     schemaVersion: 1,
     updatedAt: new Date().toISOString(),
@@ -364,17 +389,18 @@ async function loadReferenceRejections(outputRoot, runDir) {
     dailyFile,
     global,
     daily,
-    pinIds: new Set(activeGlobal.map((item) => item.pinId).filter(Boolean))
+    itemKeys: new Set(activeGlobal.map(referenceIdentityKey).filter(Boolean))
   };
 }
 
 async function recordReferenceRejection(state, item) {
-  const record = { ...item, active: true, rejectedAt: new Date().toISOString() };
-  if (!state.pinIds.has(record.pinId)) {
-    state.global = state.global.filter((existing) => existing.pinId !== record.pinId).concat(record);
-    state.pinIds.add(record.pinId);
+  const record = { ...item, provider: referenceProvider(item), active: true, rejectedAt: new Date().toISOString() };
+  const itemKey = referenceIdentityKey(record);
+  if (!state.itemKeys.has(itemKey)) {
+    state.global = state.global.filter((existing) => referenceIdentityKey(existing) !== itemKey).concat(record);
+    state.itemKeys.add(itemKey);
   }
-  state.daily = state.daily.filter((existing) => existing.pinId !== record.pinId).concat(record);
+  state.daily = state.daily.filter((existing) => referenceIdentityKey(existing) !== itemKey).concat(record);
   const updatedAt = new Date().toISOString();
   await Promise.all([
     writeJsonAtomic(state.globalFile, { schemaVersion: 1, updatedAt, rejections: state.global }),
@@ -389,7 +415,7 @@ export function looksLikeBlockedPage(text) {
     || /(?:method\s+not\s+allowed|not\s+allowed)[\s\S]{0,80}(?:^|\s)405(?:\s|$)/i.test(value);
 }
 
-async function chooseSearchBox(page) {
+async function chooseHuabanSearchBox(page) {
   const started = Date.now();
   while (Date.now() - started < 15_000) {
     const pageText = await page.locator("body").innerText({ timeout: 5_000 }).catch(() => "");
@@ -407,7 +433,7 @@ async function chooseSearchBox(page) {
   throw new Error("未找到花瓣搜索框");
 }
 
-async function collectVisiblePins(page) {
+async function collectVisibleHuabanPins(page) {
   return page.evaluate(() => {
     const seen = new Set();
     const rows = [];
@@ -429,8 +455,8 @@ async function collectVisiblePins(page) {
   });
 }
 
-async function searchPins(page, keyword, needed, excludedPinIds, maxScrolls) {
-  const box = await chooseSearchBox(page);
+async function searchHuabanPins(page, keyword, needed, excludedPinIds, maxScrolls) {
+  const box = await chooseHuabanSearchBox(page);
   await box.fill(keyword);
   await box.press("Enter");
   await page.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => {});
@@ -439,7 +465,8 @@ async function searchPins(page, keyword, needed, excludedPinIds, maxScrolls) {
   if (looksLikeBlockedPage(pageText)) throw new Error("花瓣要求安全验证，请在专用浏览器窗口中完成后重试");
   const collected = new Map();
   for (let attempt = 0; attempt < maxScrolls && collected.size < needed; attempt += 1) {
-    for (const row of await collectVisiblePins(page)) {
+    for (const row of await collectVisibleHuabanPins(page)) {
+      row.provider = "huaban";
       if (!excludedPinIds.has(row.pinId)) collected.set(row.pinId, row);
     }
     if (collected.size >= needed) break;
@@ -449,10 +476,16 @@ async function searchPins(page, keyword, needed, excludedPinIds, maxScrolls) {
   return [...collected.values()];
 }
 
+async function searchPins(page, keyword, needed, excludedPinIds, maxScrolls) {
+  return searchHuabanPins(page, keyword, needed, excludedPinIds, maxScrolls);
+}
+
 function detailImageCandidates(images) {
-  return images
+  const sourcePattern = /hbimg|huaban/i;
+  const candidates = images
     .filter((image) => image.visible && image.displayWidth >= 180 && image.displayHeight >= 120)
-    .filter((image) => image.urls.some((url) => /hbimg|huaban/i.test(url)))
+    .filter((image) => image.urls.some((url) => sourcePattern.test(url)));
+  return candidates
     .sort((left, right) => {
       const displayDelta = right.displayWidth * right.displayHeight - left.displayWidth * left.displayHeight;
       if (displayDelta) return displayDelta;
@@ -461,6 +494,7 @@ function detailImageCandidates(images) {
 }
 
 export async function resolveDetailImageUrls(page, item) {
+  const listImageUrls = [item.listImageUrl].filter(Boolean);
   const response = await page.goto(item.sourceUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
   await page.waitForTimeout(1200);
   if ([401, 403, 405, 429].includes(response?.status())) {
@@ -469,39 +503,56 @@ export async function resolveDetailImageUrls(page, item) {
   const pageText = await page.locator("body").innerText({ timeout: 15_000 });
   if (looksLikeBlockedPage(pageText)) throw new Error("花瓣详情页要求安全验证，请在专用浏览器窗口中完成后重试");
 
-  const images = await page.locator("img").evaluateAll((nodes) => nodes.map((image) => {
-    const rect = image.getBoundingClientRect();
-    const style = getComputedStyle(image);
-    const urls = [];
-    const add = (value) => {
-      if (!value || value.startsWith("data:")) return;
-      try { urls.push(new URL(value, location.href).href); } catch {}
+  const images = await page.locator("img").evaluateAll((nodes, visibleListImageUrls) => {
+    const assetKey = (value) => {
+      try {
+        const filename = new URL(value, location.href).pathname.split("/").pop() || "";
+        return filename.replace(/\.[^.]+$/, "");
+      } catch {
+        return "";
+      }
     };
-    const addSrcset = (value) => {
-      for (const candidate of String(value || "").split(",")) add(candidate.trim().split(/\s+/)[0]);
-    };
-    add(image.currentSrc);
-    add(image.src);
-    add(image.getAttribute("data-src"));
-    add(image.getAttribute("data-original"));
-    addSrcset(image.srcset);
-    addSrcset(image.getAttribute("data-srcset"));
-    return {
-      visible: rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity || 1) > 0,
-      displayWidth: rect.width,
-      displayHeight: rect.height,
-      naturalWidth: image.naturalWidth || 0,
-      naturalHeight: image.naturalHeight || 0,
-      urls: [...new Set(urls)]
-    };
-  }));
+    const listAssetKeys = new Set(visibleListImageUrls.map(assetKey).filter(Boolean));
+    return nodes.map((image) => {
+      const rect = image.getBoundingClientRect();
+      const style = getComputedStyle(image);
+      const urls = [];
+      const add = (value) => {
+        if (!value || value.startsWith("data:")) return;
+        try { urls.push(new URL(value, location.href).href); } catch {}
+      };
+      const addSrcset = (value) => {
+        for (const candidate of String(value || "").split(",")) add(candidate.trim().split(/\s+/)[0]);
+      };
+      add(image.currentSrc);
+      add(image.src);
+      add(image.getAttribute("data-src"));
+      add(image.getAttribute("data-original"));
+      addSrcset(image.srcset);
+      addSrcset(image.getAttribute("data-srcset"));
+      const uniqueUrls = [...new Set(urls)];
+      return {
+        visible: rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity || 1) > 0,
+        isMainPin: /mainpinimage/i.test(image.getAttribute("elementtiming") || "")
+          || Boolean(image.closest('[data-test-id="story-pin-image-block"], [data-test-id="closeup-image"]'))
+          || uniqueUrls.some((url) => listAssetKeys.has(assetKey(url))),
+        displayWidth: rect.width,
+        displayHeight: rect.height,
+        naturalWidth: image.naturalWidth || 0,
+        naturalHeight: image.naturalHeight || 0,
+        urls: uniqueUrls
+      };
+    });
+  }, listImageUrls);
 
   const main = detailImageCandidates(images)[0];
-  if (!main) throw new Error(`Pin ${item.pinId} 详情页未找到可见主图`);
-  return [...new Set([...main.urls, item.listImageUrl].filter(Boolean))];
+  if (!main) {
+    throw new Error(`Pin ${item.pinId} 详情页未找到可见主图`);
+  }
+  return [...new Set([...main.urls, ...listImageUrls].filter(Boolean))];
 }
 
-async function downloadBestImage(context, item, urls, targetFile, minWidth) {
+async function downloadBestImage(context, item, urls, targetFile, minWidth, browserPage = null) {
   let best = null;
   for (const imageUrl of urls.slice(0, 12)) {
     try {
@@ -559,6 +610,7 @@ async function reviewCandidateBatch({ visualReviewer, type, candidates, attempts
 }
 
 async function qualifiedExistingReferences(existing, minWidth, rejectionState, {
+  sourceProvider,
   visualReviewer,
   visualReviewBatchSize,
   visualReviewMaxAttempts
@@ -567,6 +619,7 @@ async function qualifiedExistingReferences(existing, minWidth, rejectionState, {
   const pending = [];
   for (const item of existing) {
     try {
+      if (referenceProvider(item) !== sourceProvider) continue;
       const referenceType = inferReferenceType(item);
       const titleAudit = assessReferenceTitle(referenceType, item.title, item.searchKeyword);
       if (titleAudit.decision === "reject") {
@@ -661,6 +714,7 @@ export async function collectReferences({
   count,
   visualReviewer
 }) {
+  const sourceProvider = normalizeReferenceProvider(config.collection.source || "huaban");
   const referencesDir = path.join(runDir, "references");
   await fs.mkdir(referencesDir, { recursive: true });
   await cleanupCandidateTempFiles(referencesDir);
@@ -673,6 +727,7 @@ export async function collectReferences({
   const plans = buildSearchPlans(config.collection, count, date);
   const rejectionState = await loadReferenceRejections(config.outputRoot, runDir);
   const results = await qualifiedExistingReferences(existing, minWidth, rejectionState, {
+    sourceProvider,
     visualReviewer,
     visualReviewBatchSize,
     visualReviewMaxAttempts
@@ -762,7 +817,15 @@ export async function collectReferences({
         && emptyQueries < plan.keywords.length * 2) {
         const query = plan.keywords[queryCursor % plan.keywords.length];
         queryCursor += 1;
-        const excluded = new Set([...history.pinIds, ...rejectionState.pinIds, ...attemptedPinIds]);
+        const excluded = new Set([
+          ...history.references
+            .filter((item) => referenceProvider(item) === sourceProvider)
+            .map((item) => item.pinId),
+          ...rejectionState.global
+            .filter((item) => item.active !== false && referenceProvider(item) === sourceProvider)
+            .map((item) => item.pinId),
+          ...attemptedPinIds
+        ]);
         const candidates = await searchPins(
           page,
           query,
@@ -793,7 +856,7 @@ export async function collectReferences({
             continue;
           }
           downloadedCandidates += 1;
-          const downloadFile = path.join(referencesDir, `.download-${candidate.pinId}`);
+          const downloadFile = path.join(referencesDir, `.download-${sourceProvider}-${candidate.pinId}`);
           let candidateFile = downloadFile;
           try {
             const urls = await resolveDetailImageUrls(detailPage, candidate);
@@ -802,7 +865,8 @@ export async function collectReferences({
               candidate,
               urls,
               downloadFile,
-              minimumReferenceWidth(plan.type, minWidth)
+              minimumReferenceWidth(plan.type, minWidth),
+              detailPage
             );
             const { buffer, metadata, imageUrl, fileSize } = downloaded;
             const visualAudit = await assessReferenceVisual(plan.type, buffer);
@@ -829,7 +893,7 @@ export async function collectReferences({
               continue;
             }
             const extension = metadata.format === "png" ? "png" : metadata.format === "webp" ? "webp" : "jpg";
-            candidateFile = path.join(referencesDir, `.candidate-${plan.type}-${candidate.pinId}.${extension}`);
+            candidateFile = path.join(referencesDir, `.candidate-${sourceProvider}-${plan.type}-${candidate.pinId}.${extension}`);
             await fs.rename(downloadFile, candidateFile);
             reviewQueue.push({
               ...candidate,
@@ -876,14 +940,14 @@ export async function collectReferences({
 
   const selected = selectAvailableReferencesForPlans(results, plans);
   if (selected.length < count) {
-    await screenshotFailure(page, path.join(runDir, "huaban-incomplete.png"));
+    await screenshotFailure(page, path.join(runDir, `${sourceProvider}-incomplete.png`));
     console.warn(`本轮获得 ${selected.length}/${count} 张不重复参考图；缺失方向将在 manifest 中记录后跳过`);
   }
 
   const csvRows = results.map((item, index) => [
     index + 1, item.pinId, item.referenceType, item.title, item.sourceUrl, item.listImageUrl, item.imageUrl,
     item.width, item.height, item.fileSize,
-    item.searchKeyword, item.collectedAt, item.sha256, item.ahash
+    item.searchKeyword, item.collectedAt, item.sha256, item.ahash, referenceProvider(item)
   ].map(csvCell).join(","));
   await fs.writeFile(path.join(runDir, "sources.csv"), CSV_HEADER + `${csvRows.join("\n")}\n`, "utf8");
   return selected;

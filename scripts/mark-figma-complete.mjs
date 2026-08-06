@@ -13,7 +13,11 @@ const runFile = path.join(config.outputRoot, date, "run.json");
 const current = await readJson(runFile);
 
 if (!current) throw new Error(`未找到 ${date} 的 run.json`);
-if (current.stages?.generation !== "complete") throw new Error("本地生成阶段尚未完成，不能标记 Figma 完成");
+const generationStage = current.stages?.generation;
+const hasReadyDirections = Number(current.directionCount || 0) > 0;
+if (current.status !== "awaiting_figma" || !["complete", "partial"].includes(generationStage) || !hasReadyDirections) {
+  throw new Error("没有可同步的已就绪方向，不能标记 Figma 完成");
+}
 
 const sectionId = value("--section-id");
 const sectionName = value("--section-name") || `${date} 自动采集`;
@@ -26,7 +30,7 @@ if (!Number.isInteger(uploadedAssetCount) || uploadedAssetCount < 0) throw new E
 const next = await updateRun(runFile, {
   status: "complete",
   completedAt: new Date().toISOString(),
-  stages: { collection: "complete", generation: "complete", figma: "complete" },
+  stages: { ...current.stages, figma: "complete" },
   figma: {
     fileKey: config.figma.fileKey,
     pageId: config.figma.pageId,

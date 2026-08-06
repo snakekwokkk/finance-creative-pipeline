@@ -15,6 +15,7 @@
     "pageId": "0:1"
   },
   "collection": {
+    "source": "huaban",
     "referenceCount": 10,
     "minReferenceWidthPx": 720,
     "maxScannedCandidatesPerDirection": 30,
@@ -39,7 +40,7 @@
       {
         "type": "float",
         "count": 2,
-        "keywords": ["金融 活动浮窗", "借款 福利浮窗", "贷款 红包浮窗", "理财 活动浮标", "金融 福利入口", "金融 悬浮入口", "借贷 活动挂件", "金融 运营浮标", "金融 运营贴片", "借款 活动贴片"]
+        "keywords": ["金融 活动浮窗", "借款 福利浮窗", "贷款 红包浮窗", "理财 活动浮标", "金融 权益入口", "金融 悬浮球", "借款 红包挂件", "金融 会员浮标", "金融 3D素材", "金融 插图素材"]
       }
     ]
   },
@@ -54,7 +55,7 @@
     "imageTimeoutMinutes": 5
   },
   "transparentAssets": {
-    "maxAssets": 4,
+    "maxAssets": 8,
     "timeoutMinutes": 5,
     "maxAttempts": 2,
     "minForegroundRatio": 0.005,
