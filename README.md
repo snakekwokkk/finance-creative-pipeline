@@ -49,9 +49,9 @@ Finance Creative Pipeline 是一个面向中国互联网金融运营素材的 Co
 - `figma-manifest.json` 只由生成器写入；Figma 节点和逐方向 QA 状态独立保存在 `figma-sync-state.json`，以产物指纹防止重生成后误用旧同步结果。
 - 每次运行固定使用花瓣作为参考图来源。
 - 参考图按类型采集：弹窗、Banner、浮窗分别使用匹配的关键词池和数量配额，不混用搜索词。搜索词负责方向，尺寸和透明度负责基础过滤，ChatGPT Web 根据图片实际内容做最终判断；浮窗允许金融 3D 素材、插图、红包、金币、徽章或元素加按钮，花瓣标题只用于快速排除明确写着背景、模板、完整页面或其他行业的候选。
-- 每个缺失方向最多扫描 30 个未见 Pin，每个关键词最多取 3 个候选，最多临时下载 8 张；候选按每批最多 3 张放入当天项目中的类型筛选聊天，降低 ChatGPT 附件额度消耗。只有同时通过类型、完整成品、金融相关和最低 60 分的图片才会正式进入 `references/`；结构和可用性作为软性参考信号。数字、`元`、`¥/$/%`、金币、优惠券、仪表盘、红包、利息或息费都算金融相关线索，失败临时文件会删除并记录审核原因。
+- 每个缺失方向最多扫描 30 个未见 Pin，每个关键词最多取 3 个候选，最多临时下载 8 张；候选按每批最多 5 张放入当天项目中的类型筛选聊天。图片可访问、类型匹配、设计完整且含广义运营信号时直接进入 `references/`；分数、结构和可用性只用于审计和排序，不再拥有否决权。数字、金额、`元`、`¥/$/%`、金币、优惠券、仪表盘、数据图表、趋势或上升箭头、红包、利息或息费均算合格信号，出行、电商、会员等其他行业不会因此被拒绝。
 - 弹窗和 Banner 保留默认 720px 最低宽度，Banner 继续要求宽高比至少 1.5；浮窗不使用宽度、高宽比或 Alpha 门槛，只要是可识别的金融单元素或元素加按钮即可进入看图审核。模糊标题、文件名和 `IMG_*` 不再直接淘汰。
-- `reference-history.json` 长期记录已采集的花瓣 Pin，并通过图片指纹排除同一图片。
+- `reference-history.json` 长期记录已采集的花瓣 Pin，并通过 SHA-256、花瓣素材键和联合感知指纹排除同一图片；单独的 aHash 碰撞不会再淘汰不同设计，重复判定会记录匹配 Pin 和依据。
 - Figma 左侧始终是完整预览，右侧必须是可见的可编辑重建，禁止左右两边显示同一张扁平图。
 
 ### 环境要求
@@ -145,7 +145,6 @@ codex plugin add finance-creative-pipeline@<marketplace-name>
 | `collection.visualReviewBatchSize` | 单次 ChatGPT 直链内容审核最多候选数，上限和默认均为 5 |
 | `collection.visualReviewTimeoutMinutes` | 每批直链审核等待上限，默认 4 分钟 |
 | `collection.visualReviewMaxAttempts` | 每批候选内容审核总尝试次数，默认 2 |
-| `collection.visualReviewMinimumScore` | 候选图片内容审核最低分，默认 60 |
 | `collection.maxSearchScrolls` | 为寻找未采集 Pin 执行的最大滚动次数 |
 | `collection.searchPlans` | 弹窗、Banner、浮窗各自的配额和搜索词列表 |
 | `generation.directionCount` | 原创方向数量 |
@@ -212,7 +211,7 @@ YYYY-MM-DD/
             └── NN-layer-id.png
 ```
 
-输出根目录还会维护 `reference-history.json` 和 `reference-rejections.json`：前者长期保存已接受的 Pin ID、aHash、来源、尺寸和采集日期；后者保存因标题或视觉结构不符合类型而拒绝的 Pin 及具体原因。每日运行会跳过两类历史记录并继续向下检索。恢复旧运行时，若某个 `ready` 方向引用的素材在重新审计后进入当天拒绝台账，只让该方向失效并使用新合格参考重新生成；其他完整方向继续复用。
+输出根目录还会维护 `reference-history.json` 和 `reference-rejections.json`：前者长期保存已接受的 Pin ID、SHA-256、aHash、256 位 dHash、来源、尺寸和采集日期；后者保存因标题、视觉结构或已确认重复而拒绝的 Pin 及具体原因。重复图片必须由精确哈希、相同花瓣素材键或联合感知指纹确认，不能仅凭 aHash 和宽高比淘汰。每日运行会跳过两类历史记录并继续向下检索。恢复旧运行时，若某个 `ready` 方向引用的素材在重新审计后进入当天拒绝台账，只让该方向失效并使用新合格参考重新生成；其他完整方向继续复用。
 
 - `preview.png`：完整、扁平化的最终预览。
 - `spec.json`：仅用于兼容旧版运行；新方向不再生成中间设计规格。
@@ -312,10 +311,10 @@ A normal run collects 10 references and generates 10 original directions: six po
 - Reference images use ChatGPT's image-specific upload input. After the expected filename, rendered thumbnail, and send-ready state are verified, the same message asks ChatGPT to understand the reference internally and directly generate the preview. The normal successful path uploads once and produces no intermediate analysis, design spec, or visible image prompt. Ordinary generation retries reuse the reference already present in the chat; re-upload occurs only when ChatGPT explicitly reports the reference missing.
 - Resume from `run.json` and `figma-manifest.json` to avoid duplicate collection, generation, or dated Figma sections.
 - Use Huaban as the sole reference provider for every run.
-- Collect popup, Banner, and floating references from separate type-matched keyword pools. Queries establish discovery direction, technical checks enforce dimensions where applicable, and ChatGPT Web makes the final decision from actual image content. Floating references may be standalone finance 3D assets, illustrations, red envelopes, coins, badges, or an asset-plus-button composition. Titles only hard-reject candidates that explicitly describe backgrounds, templates, full pages, or unrelated industries.
-- For each missing direction, scan up to 30 unseen Pins, rotate after at most three candidates per query, and resolve fresh public main-image URLs from the locally authenticated Huaban detail page. Review up to five URLs per batch in the dated project's type-specific audit chat. Require `imageAccessible: true`, type match, complete-design, finance relevance, and the default score threshold of 60; treat structure and usability as soft signals. Download only approved candidates, at most eight per missing direction, then run pixel, hash, and duplicate checks. Arabic numerals, `元`, `¥/$/%`, coins, coupons, dashboards, red envelopes, and interest or fee wording all count as finance-relevant signals.
+- Collect popup, Banner, and floating references from separate type-matched keyword pools. Queries establish discovery direction, technical checks enforce dimensions where applicable, and ChatGPT Web makes the final decision from actual image content. Floating references may be standalone finance 3D assets, illustrations, red envelopes, coins, badges, or an asset-plus-button composition. Titles only hard-reject candidates that explicitly describe backgrounds, templates, full pages, or atomic elements, never merely another industry.
+- For each missing direction, scan up to 30 unseen Pins, rotate after at most three candidates per query, and resolve fresh public main-image URLs from the locally authenticated Huaban detail page. Review up to five URLs per batch in the dated project's type-specific audit chat. Accept every accessible, type-matched, complete design with any broad operational signal; score, structure, and usability remain audit metadata and cannot veto acceptance. Arabic numerals, explicit amounts, `元`, `¥/$/%`, coins, coupons, dashboards, data charts, trend or upward arrows, red envelopes, and interest or fee wording all qualify. Travel, ecommerce, membership, dining, utility, and other-industry references remain valid when those conditions pass.
 - Popup and Banner references retain the 720 px minimum-width gate, and Banners retain an aspect ratio of at least 1.5. Floating references have no width, aspect-ratio, or Alpha gate at collection time; opaque standalone subjects proceed to later ChatGPT transparent extraction. Ambiguous titles, filenames, and `IMG_*` labels proceed to image-content review instead of being rejected.
-- Keep Huaban Pin IDs and image fingerprints in `reference-history.json` to avoid collecting the same image again.
+- Keep Huaban Pin IDs and strong image fingerprints in `reference-history.json` to avoid collecting the same image again. Exact hashes, stable Huaban asset keys, or combined aHash and 256-bit dHash fingerprints may reject a duplicate; aHash plus aspect ratio alone may not.
 - The Figma preview stays on the left. The right side must visibly render editable layers and must never duplicate the same flattened image.
 
 ### Requirements
@@ -403,7 +402,6 @@ User configuration lives outside the repository and should never be committed:
 | `collection.visualReviewBatchSize` | Maximum public image URLs in one ChatGPT content-audit batch; defaults to and is capped at 5 |
 | `collection.visualReviewTimeoutMinutes` | Wait limit per URL content-audit batch; defaults to 4 minutes |
 | `collection.visualReviewMaxAttempts` | Content-audit attempts per batch; defaults to 2 |
-| `collection.visualReviewMinimumScore` | Minimum image-content score; defaults to 60 |
 | `collection.maxSearchScrolls` | Maximum scroll attempts used to find unseen Pins |
 | `collection.searchPlans` | Type-specific quotas and queries for popup, Banner, and floating references |
 | `generation.directionCount` | Number of original directions |
@@ -434,7 +432,7 @@ Daily artifacts are stored by default under:
 ~/Desktop/互联网金融素材/YYYY-MM-DD/
 ```
 
-The output root also contains `reference-history.json`, a persistent ledger of accepted Pin IDs, aHashes, sources, dimensions, and collection dates. Each run reads it before scrolling for unseen results.
+The output root also contains `reference-history.json`, a persistent ledger of accepted Pin IDs, SHA-256 hashes, aHashes, 256-bit dHashes, sources, dimensions, and collection dates. Each run reads it before scrolling for unseen results, and every duplicate decision is written to the rejection ledger with the matched Pin and reason.
 
 Primary states:
 

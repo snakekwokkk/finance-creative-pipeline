@@ -5,7 +5,7 @@ import sharp from "sharp";
 import { readJson, writeJsonAtomic } from "./state.mjs";
 import { screenshotFailure } from "./browser.mjs";
 
-const CSV_HEADER = "index,pin_id,reference_type,title,source_url,list_image_url,image_url,width,height,file_size,search_keyword,collected_at,sha256,ahash,provider\n";
+const CSV_HEADER = "index,pin_id,reference_type,title,source_url,list_image_url,image_url,width,height,file_size,search_keyword,collected_at,sha256,ahash,dhash,provider\n";
 const HISTORY_FILE = "reference-history.json";
 const REJECTIONS_FILE = "reference-rejections.json";
 const POPUP_FORM_PATTERN = /弹窗|弹框|模态|对话框|浮层|遮罩/i;
@@ -14,10 +14,10 @@ const POPUP_ATOMIC_PATTERN = /背景|底图|纹理|壁纸|边框|框架|按钮�
 const POPUP_PAGE_PATTERN = /完整页面|页面设计|界面设计|首页|详情页|落地页|启动页/i;
 const BANNER_FORM_PATTERN = /banner|横幅|横版|横板|首图|头图|广告|焦点图|宣传|推广|营销|活动/i;
 const BANNER_CONTEXT_PATTERN = /金融|借款|贷款|助贷|理财|投资|基金|证券|保险|财富|资产|权益|收益|行情|股票|债券|期货|黄金|新客|会员|红包|福利/i;
-const BANNER_BLOCKED_PATTERN = /教育|培训|教资|餐饮|美食|地产|房产|家装|医美|美容|旅游|婚庆|招聘|汽车|游戏|电商|零售|商品|背景|底图|纹理|壁纸|边框|框架|按钮|贴纸|字体|字效|图标|icon|logo|元素|素材包|样机|模板/i;
+const BANNER_BLOCKED_PATTERN = /背景|底图|纹理|壁纸|边框|框架|按钮|贴纸|字体|字效|图标|icon|logo|元素|素材包|样机|模板/i;
 const FLOAT_FORM_PATTERN = /浮窗|悬浮窗|浮标|活动入口|福利入口|红包入口|悬浮入口|运营挂件|活动挂件|侧边挂件|运营贴片|活动贴片/i;
 const FLOAT_CONTEXT_PATTERN = /金融|借款|贷款|助贷|理财|投资|基金|证券|红包|福利|优惠|领券|新客|会员|任务|奖励|活动|营销/i;
-const FLOAT_BLOCKED_PATTERN = /背景|底图|纹理|壁纸|弥散|边框|框架|banner|横幅|海报|商品|零售|餐饮|美食|教育|培训|地产|医美|旅游|婚庆|招聘|汽车|游戏|(?:完整|手机|网页|app).*(?:页面|界面)|导航|菜单/i;
+const FLOAT_BLOCKED_PATTERN = /背景|底图|纹理|壁纸|弥散|边框|框架|banner|横幅|海报|按钮文字|贴纸素材|(?:完整|手机|网页|app).*(?:页面|界面)|导航|菜单/i;
 const DEFAULT_SEARCH_PLANS = [
   {
     type: "popup",
@@ -78,13 +78,54 @@ async function averageHash(buffer) {
   return [...pixels].map((value) => (value >= avg ? "1" : "0")).join("");
 }
 
-export function isSameImage(candidate, references) {
+async function differenceHash(buffer) {
+  const { data, info } = await sharp(buffer)
+    .resize(17, 16, { fit: "fill" })
+    .greyscale()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const bits = [];
+  for (let y = 0; y < info.height; y += 1) {
+    for (let x = 0; x < info.width - 1; x += 1) {
+      const offset = y * info.width + x;
+      bits.push(data[offset] >= data[offset + 1] ? "1" : "0");
+    }
+  }
+  return bits.join("");
+}
+
+export function huabanAssetKey(value) {
+  try {
+    const filename = path.basename(new URL(String(value)).pathname);
+    return filename.replace(/_fw\d+(?:webp)?$/i, "") || null;
+  } catch {
+    return null;
+  }
+}
+
+export function findDuplicateImage(candidate, references) {
   const candidateRatio = candidate.width / candidate.height;
-  return references.some((existing) => {
-    if (candidate.sha256 && existing.sha256 === candidate.sha256) return true;
-    if (!candidate.ahash || existing.ahash !== candidate.ahash || !existing.width || !existing.height) return false;
-    return Math.abs(candidateRatio - existing.width / existing.height) <= 0.01;
-  });
+  const candidateAssetKey = huabanAssetKey(candidate.imageUrl);
+  for (const existing of references) {
+    if (candidate.sha256 && existing.sha256 === candidate.sha256) {
+      return { reference: existing, reason: "sha256" };
+    }
+    const existingAssetKey = huabanAssetKey(existing.imageUrl);
+    if (candidateAssetKey && existingAssetKey === candidateAssetKey) {
+      return { reference: existing, reason: "huaban-asset-key" };
+    }
+    if (!candidate.ahash || !candidate.dhash || !existing.ahash || !existing.dhash) continue;
+    if (!existing.width || !existing.height) continue;
+    const sameRatio = Math.abs(candidateRatio - existing.width / existing.height) <= 0.01;
+    if (sameRatio && candidate.ahash === existing.ahash && candidate.dhash === existing.dhash) {
+      return { reference: existing, reason: "combined-perceptual-fingerprint" };
+    }
+  }
+  return null;
+}
+
+export function isSameImage(candidate, references) {
+  return Boolean(findDuplicateImage(candidate, references));
 }
 
 export function minimumReferenceWidth(type, configuredWidth = 720) {
@@ -308,6 +349,7 @@ function historyRecord(item, date) {
     provider: referenceProvider(item),
     pinId: item.pinId,
     ahash: item.ahash,
+    dhash: item.dhash,
     sha256: item.sha256,
     referenceType: inferReferenceType(item),
     sourceUrl: item.sourceUrl,
@@ -839,8 +881,33 @@ export async function collectReferences({
                 continue;
               }
               const sha256 = crypto.createHash("sha256").update(buffer).digest("hex");
-              const ahash = await averageHash(buffer);
-              if (isSameImage({ sha256, ahash, width: metadata.width, height: metadata.height }, [...history.references, ...results])) {
+              const [ahash, dhash] = await Promise.all([averageHash(buffer), differenceHash(buffer)]);
+              const duplicate = findDuplicateImage(
+                { sha256, ahash, dhash, imageUrl, width: metadata.width, height: metadata.height },
+                [...history.references, ...results]
+              );
+              if (duplicate) {
+                const matchedPinId = duplicate.reference.pinId || "未知";
+                const reason = `与历史 Pin ${matchedPinId} 重复（${duplicate.reason}）`;
+                await recordReferenceRejection(rejectionState, {
+                  pinId: candidate.pinId,
+                  referenceType: plan.type,
+                  title: candidate.title,
+                  sourceUrl: candidate.sourceUrl,
+                  imageUrl,
+                  searchKeyword: candidate.searchKeyword,
+                  stage: "duplicate",
+                  reasons: [reason],
+                  metrics: {
+                    matchReason: duplicate.reason,
+                    matchedPinId,
+                    matchedImageUrl: duplicate.reference.imageUrl || null,
+                    sha256,
+                    ahash,
+                    dhash
+                  }
+                });
+                console.warn(`跳过 Pin ${candidate.pinId}：${reason}`);
                 continue;
               }
               const extension = metadata.format === "png" ? "png" : metadata.format === "webp" ? "webp" : "jpg";
@@ -857,6 +924,7 @@ export async function collectReferences({
                 fileSize,
                 sha256,
                 ahash,
+                dhash,
                 contentAudit: audit,
                 collectedAt: new Date().toISOString()
               };
@@ -1013,7 +1081,7 @@ export async function collectReferences({
   const csvRows = results.map((item, index) => [
     index + 1, item.pinId, item.referenceType, item.title, item.sourceUrl, item.listImageUrl, item.imageUrl,
     item.width, item.height, item.fileSize,
-    item.searchKeyword, item.collectedAt, item.sha256, item.ahash, referenceProvider(item)
+    item.searchKeyword, item.collectedAt, item.sha256, item.ahash, item.dhash, referenceProvider(item)
   ].map(csvCell).join(","));
   await fs.writeFile(path.join(runDir, "sources.csv"), CSV_HEADER + `${csvRows.join("\n")}\n`, "utf8");
   return selected;

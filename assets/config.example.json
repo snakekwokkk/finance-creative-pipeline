@@ -24,7 +24,6 @@
     "visualReviewBatchSize": 5,
     "visualReviewTimeoutMinutes": 4,
     "visualReviewMaxAttempts": 2,
-    "visualReviewMinimumScore": 60,
     "maxSearchScrolls": 20,
     "searchPlans": [
       {

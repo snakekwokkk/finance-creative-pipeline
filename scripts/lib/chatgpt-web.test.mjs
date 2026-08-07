@@ -184,10 +184,10 @@ test("reference content audits live in dated-project chats and rely on image con
   assert.match(prompt, /public|imageUrl|公开/);
   assert.match(prompt, /imageAccessible/);
   assert.match(prompt, /最终结论必须以图片实际内容为主/);
-  assert.match(prompt, /拒绝背景、按钮、优惠券、金币、图标、装饰元素/);
-  assert.match(prompt, /financeRelevant 50%/);
-  assert.match(prompt, /阿拉伯数字、汉字“元”、¥、\$、%、金币、优惠券、仪表盘、红包、利息\/息费/);
-  assert.doesNotMatch(prompt, /真实品牌Logo、二维码、其他行业、夸大金融承诺/);
+  assert.match(prompt, /包含优惠券、金额或运营权益的完整弹窗应保留/);
+  assert.match(prompt, /阿拉伯数字、汉字“元”、¥、\$、%、明确金额、金币、优惠券或券面、仪表盘、数据图表、折线\/趋势\/上升箭头、红包、利息\/息费/);
+  assert.match(prompt, /不得因为素材属于出行、电商、会员、餐饮、工具等其他行业/);
+  assert.match(prompt, /score 只用于描述与排序，没有否决权/);
   assert.match(prompt, /https:\/\/img\.example\/p1\.webp/);
   assert.doesNotMatch(prompt, /上传的候选图片|附件文件名/);
 
@@ -201,17 +201,26 @@ REFERENCE_AUDIT_END`, candidates);
   assert.equal(parsed.candidates[0].accepted, true);
   assert.equal(parsed.candidates[1].accepted, false);
   const softSignals = parseReferenceAudit(`REFERENCE_AUDIT_START
-{"candidates":[{"pinId":"p1","imageAccessible":true,"typeMatch":true,"completeDesign":true,"financeRelevant":true,"structureValid":false,"usableReference":false,"score":60}]}
-REFERENCE_AUDIT_END`, [candidates[0]], 60);
+{"candidates":[{"pinId":"p1","imageAccessible":true,"typeMatch":true,"completeDesign":true,"financeRelevant":true,"structureValid":false,"usableReference":false,"score":20}]}
+REFERENCE_AUDIT_END`, [candidates[0]]);
   assert.equal(softSignals.candidates[0].accepted, true);
   const inaccessible = parseReferenceAudit(`REFERENCE_AUDIT_START
 {"candidates":[{"pinId":"p1","imageAccessible":false,"typeMatch":true,"completeDesign":true,"financeRelevant":true,"structureValid":true,"usableReference":true,"score":99,"accessNote":"访问超时"}]}
-REFERENCE_AUDIT_END`, [candidates[0]], 60);
+REFERENCE_AUDIT_END`, [candidates[0]]);
   assert.equal(inaccessible.candidates[0].accepted, false);
   assert.deepEqual(inaccessible.candidates[0].reasons, ["访问超时"]);
   assert.throws(() => parseReferenceAudit(`REFERENCE_AUDIT_START
 {"candidates":[{"pinId":"p1","score":90}]}
 REFERENCE_AUDIT_END`, candidates), /漏掉候选/);
+});
+
+test("the first popup audit batch passes all complete designs with broad operational signals", () => {
+  const candidates = ["6771141487", "6179343771", "6746960828", "6380027999", "6708687315"]
+    .map((pinId) => ({ pinId, imageUrl: `https://img.example/${pinId}.webp` }));
+  const parsed = parseReferenceAudit(`REFERENCE_AUDIT_START
+{"candidates":[{"pinId":"6771141487","imageAccessible":true,"typeMatch":true,"completeDesign":true,"financeRelevant":true,"structureValid":true,"usableReference":false,"score":55,"reasons":["出行优惠券弹窗"]},{"pinId":"6179343771","imageAccessible":true,"typeMatch":true,"completeDesign":true,"financeRelevant":true,"structureValid":true,"usableReference":false,"score":50,"reasons":["电商免单卡弹窗"]},{"pinId":"6746960828","imageAccessible":true,"typeMatch":true,"completeDesign":true,"financeRelevant":true,"structureValid":true,"usableReference":true,"score":100,"reasons":["借款额度弹窗"]},{"pinId":"6380027999","imageAccessible":true,"typeMatch":true,"completeDesign":true,"financeRelevant":true,"structureValid":true,"usableReference":false,"score":55,"reasons":["公交优惠券弹窗"]},{"pinId":"6708687315","imageAccessible":true,"typeMatch":true,"completeDesign":true,"financeRelevant":true,"structureValid":true,"usableReference":false,"score":50,"reasons":["会员金额弹窗"]}]}
+REFERENCE_AUDIT_END`, candidates);
+  assert.deepEqual(parsed.candidates.map((item) => item.accepted), [true, true, true, true, true]);
 });
 
 test("reference audit marker listener finds the completed matching batch", () => {

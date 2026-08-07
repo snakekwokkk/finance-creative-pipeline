@@ -10,6 +10,8 @@ import {
   buildSearchPlansForTypes,
   collectionCandidateBudgets,
   exposedImageWidthHint,
+  findDuplicateImage,
+  huabanAssetKey,
   isSameImage,
   looksLikeBlockedPage,
   minimumReferenceWidth,
@@ -131,7 +133,7 @@ test("detail-page URL selection prefers the highest exposed Huaban rendition", (
   });
 });
 
-test("float titles allow standalone finance elements and reject obvious unrelated assets", () => {
+test("float titles allow other industries but reject atomic assets without operational signals", () => {
   assert.equal(assessReferenceTitle("float", "金融新客福利活动浮窗").accepted, true);
   assert.equal(assessReferenceTitle("float", "借款红包活动入口").accepted, true);
   assert.equal(assessReferenceTitle("float", "商品零售按钮文字贴纸素材").accepted, false);
@@ -161,7 +163,8 @@ test("popup titles reject generic pins and atomic elements while keeping complet
 test("banner titles require finance plus finished horizontal marketing semantics", () => {
   assert.equal(assessReferenceTitle("banner", "金融保险产品营销商务2.5D首图").accepted, true);
   assert.equal(assessReferenceTitle("banner", "基金证券直播宣传课程封面横版banner").accepted, true);
-  assert.equal(assessReferenceTitle("banner", "教育培训资格认证横板课程封面").accepted, false);
+  assert.equal(assessReferenceTitle("banner", "教育培训资格认证横板课程封面").accepted, true);
+  assert.equal(assessReferenceTitle("banner", "旅游会员优惠横版banner").accepted, true);
   assert.equal(assessReferenceTitle("banner", "金融科技渐变背景素材").accepted, false);
   assert.equal(assessReferenceTitle("banner", "02wv087ndvwo3h3cftiq0n3537.png (1920×1080)").decision, "review");
 });
@@ -200,9 +203,58 @@ test("float visual audit accepts transparent and opaque standalone subjects", as
 });
 
 test("duplicate detection rejects only the same image", () => {
-  const history = [{ sha256: "exact", ahash: "00000000", width: 1000, height: 2000 }];
+  const history = [{
+    pinId: "old",
+    sha256: "exact",
+    ahash: "00000000",
+    dhash: "01010101",
+    width: 1000,
+    height: 2000,
+    imageUrl: "https://gd-hbimg-edge.huaban.com/old-key_fw240webp?auth_key=old"
+  }];
   assert.equal(isSameImage({ sha256: "exact", ahash: "11111111", width: 500, height: 500 }, history), true);
-  assert.equal(isSameImage({ sha256: "other", ahash: "00000000", width: 500, height: 1000 }, history), true);
-  assert.equal(isSameImage({ sha256: "other", ahash: "00000001", width: 500, height: 1000 }, history), false);
-  assert.equal(isSameImage({ sha256: "other", ahash: "00000000", width: 1000, height: 1000 }, history), false);
+  assert.equal(isSameImage({
+    sha256: "other",
+    ahash: "11111111",
+    dhash: "11111111",
+    width: 1200,
+    height: 2400,
+    imageUrl: "https://gd-hbimg-edge.huaban.com/old-key_fw1200webp?auth_key=new"
+  }, history), true);
+  assert.equal(isSameImage({ sha256: "other", ahash: "00000000", width: 500, height: 1000 }, history), false);
+  assert.equal(isSameImage({ sha256: "other", ahash: "00000000", dhash: "01010101", width: 500, height: 1000 }, history), true);
+  assert.equal(isSameImage({ sha256: "other", ahash: "00000000", dhash: "01010100", width: 500, height: 1000 }, history), false);
+  assert.equal(isSameImage({ sha256: "other", ahash: "00000000", dhash: "01010101", width: 1000, height: 1000 }, history), false);
+});
+
+test("aHash collisions between different popup screenshots are not duplicates", () => {
+  const history = [{
+    pinId: "6741109144",
+    sha256: "294a8e48b7606e10762d3eeb3866543c88ab01ac6c9f6687b74bb9b1ca734724",
+    ahash: "0000000000000000011111100111111001111110011111100000000000000000",
+    width: 240,
+    height: 520,
+    imageUrl: "https://gd-hbimg-edge.huaban.com/b0318dcbc3fdb30e12d2fd0707ea903bea5c739875849-euuTqu_fw240webp"
+  }];
+  const current = {
+    pinId: "6746960828",
+    sha256: "different-source-pixels",
+    ahash: history[0].ahash,
+    dhash: "current-popup-dhash",
+    width: 1179,
+    height: 2556,
+    imageUrl: "https://gd-hbimg-edge.huaban.com/55abae15d55a651fef2a243e2b65ec127668e56c19fa77-1n2qkY_fw1200webp"
+  };
+  assert.equal(findDuplicateImage(current, history), null);
+});
+
+test("Huaban asset keys ignore rendition width and auth query", () => {
+  assert.equal(
+    huabanAssetKey("https://gd-hbimg-edge.huaban.com/key-abc_fw1200webp?auth_key=new"),
+    "key-abc"
+  );
+  assert.equal(
+    huabanAssetKey("https://gd-hbimg-edge.huaban.com/small/key-abc_fw240webp?auth_key=old"),
+    "key-abc"
+  );
 });
