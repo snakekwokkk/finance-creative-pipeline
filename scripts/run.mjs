@@ -167,7 +167,13 @@ try {
     await notify("金融运营素材采集测试", message);
     console.log(JSON.stringify({ status, runDir, referenceCount: references.length, requestedCount: referenceCount }));
   } else {
-    await updateRun(runFile, { status: "running", referenceCount: references.length, stages: { collection: "complete", generation: "running", decomposition: "pending", figma: "pending" } });
+    const figmaSyncState = path.join(runDir, "figma-sync-state.json");
+    await updateRun(runFile, {
+      status: "running",
+      referenceCount: references.length,
+      figmaSyncState,
+      stages: { collection: "complete", generation: "running", decomposition: "running", figma: "pending" }
+    });
     const manifest = await generateDirections({
     page: chatgpt,
     config: runConfig,
@@ -178,6 +184,21 @@ try {
     runDate: date,
     initialProject: dailyProject,
     onProjectReady: (chatgptProject) => updateRun(runFile, { chatgptProject }),
+    onDirectionReady: async ({ direction, manifestFile, readyCount }) => {
+      await updateRun(runFile, {
+        readyDirectionCount: readyCount,
+        figmaManifest: manifestFile,
+        figmaSyncState
+      });
+      console.log(JSON.stringify({
+        event: "direction_ready",
+        runDir,
+        manifest: manifestFile,
+        figmaSyncState,
+        direction: { index: direction.index, type: direction.type, status: direction.status },
+        readyCount
+      }));
+    },
     shouldStop: () => Boolean(stopSignal)
   });
     const readyDirections = await readyDirectionsForFigma(manifest);
@@ -191,6 +212,7 @@ try {
       directionFailures: failures,
       chatgptProject: manifest.chatgptProject,
       figmaManifest: manifestFile,
+      figmaSyncState,
       stages: { collection: "complete", generation: "partial", decomposition: "partial", figma: "pending" }
     });
     await notify("金融运营素材流水线等待写入 Figma", `${readyCount}/${directionCount} 套可用，${failures.length} 套失败已保留；继续同步可用方向。`);
@@ -202,6 +224,7 @@ try {
       directionFailures: [],
       chatgptProject: manifest.chatgptProject,
       figmaManifest: manifestFile,
+      figmaSyncState,
       stages: { collection: "complete", generation: "complete", decomposition: "complete", figma: "pending" }
     });
     await notify("金融运营素材流水线", `${validationMode ? "验证素材" : "本地素材和生图"}已完成，等待写入 Figma：${runDir}`);
@@ -213,6 +236,7 @@ try {
       directionFailures: failures,
       chatgptProject: manifest.chatgptProject,
       figmaManifest: manifestFile,
+      figmaSyncState,
       stages: { collection: "complete", generation: "partial", decomposition: "partial", figma: "pending" }
     });
     await notify("金融运营素材流水线无可同步方向", `${failures.length} 套均失败，ChatGPT 阶段已结束，本次不写入 Figma。`);

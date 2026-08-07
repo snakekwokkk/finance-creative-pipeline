@@ -1,7 +1,10 @@
 # Changelog
 
-## Unreleased
+## 1.5.0
 
+- [新增] 每个方向完成预览、语义分层和复杂素材提取后立即发出 `direction_ready`，允许上一方向写入并核验 Figma 时，下一方向继续在 ChatGPT 生成和拆分。
+- [新增] Figma 增量同步状态独立保存到 `figma-sync-state.json`；逐方向记录 `pending/syncing/qa_passed/failed`、节点 ID、上传数与产物 SHA-256 指纹，产物变化时自动失效旧同步且复用原节点重建。
+- [调整] 全局完成命令不再接受手工汇总节点参数；仅在本地生成阶段结束、所有当前 ready 方向的产物版本均通过 Figma 视觉核验后才允许完成。
 - [修复] 参考图内容审核改为每 0.5 秒监听与当前批次 Pin ID 完全匹配的 `REFERENCE_AUDIT_START` / `REFERENCE_AUDIT_END` JSON；上传和重试前优先恢复聊天中已有的完整结果，避免因消息节点或停止按钮误判而重复提交附件。
 
 ## 1.4.3

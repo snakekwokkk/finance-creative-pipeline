@@ -1429,6 +1429,7 @@ export async function generateDirections({
   runDate = null,
   initialProject = null,
   onProjectReady = async () => {},
+  onDirectionReady = async () => {},
   shouldStop = () => false
 }) {
   await ensureChatGptLoggedIn(page);
@@ -1436,6 +1437,17 @@ export async function generateDirections({
   await fs.mkdir(directionsDir, { recursive: true });
   const manifestFile = path.join(runDir, "figma-manifest.json");
   const manifest = await readJson(manifestFile, { date: runDate || path.basename(runDir), figma: config.figma, directions: [] });
+  const emitDirectionReady = async (direction) => {
+    try {
+      await onDirectionReady({
+        direction,
+        manifestFile,
+        readyCount: manifest.directions.filter((item) => item.status === "ready").length
+      });
+    } catch (error) {
+      console.warn(`第 ${direction.index} 套 ready 事件记录失败，方向产物仍保留：${error.message}`);
+    }
+  };
   manifest.directionChats ||= {};
   const rejectionLedger = await readJson(path.join(runDir, "reference-rejections.json"), { rejections: [] });
   const rejectedSources = rejectedReferenceSourceSet(rejectionLedger);
@@ -1482,7 +1494,14 @@ export async function generateDirections({
     const existing = manifest.directions.find((item) => item.index === index && item.status === "ready");
     const existingLayers = await readJson(path.join(directionDir, "layers.json"));
     const existingReport = await readJson(path.join(directionDir, "layers", "decomposition-report.json"));
-    if (existing && existingLayers?.schemaVersion >= 4 && existingLayers.layers?.length && await reportAssetsReady(existingReport)) continue;
+    if (existing
+      && existingLayers?.schemaVersion >= 4
+      && existingLayers.layers?.length
+      && await validImageFile(existing.previewFile || path.join(directionDir, "preview.png"))
+      && await reportAssetsReady(existingReport)) {
+      await emitDirectionReady(existing);
+      continue;
+    }
     if (existing) {
       manifest.directions = manifest.directions.filter((item) => item.index !== index);
       await writeJsonAtomic(manifestFile, manifest);
@@ -1676,6 +1695,7 @@ export async function generateDirections({
       manifest.directions = manifest.directions.filter((item) => item.index !== index).concat(entry).sort((a, b) => a.index - b.index);
       clearDirectionFailure(manifest, index);
       await writeJsonAtomic(manifestFile, manifest);
+      await emitDirectionReady(entry);
     } catch (error) {
       if (workflowAbortRequested(error, shouldStop)) throw workflowAbortedError(error);
       if (requiresUserAction(error)) throw error;

@@ -25,7 +25,7 @@ Finance Creative Pipeline 是一个面向中国互联网金融运营素材的 Co
 3. 每天创建或复用一个日期项目，每个方向只使用一个项目内聊天；该方向的生图、语义拆图和必要的复杂框架补全都在同一聊天完成。
 4. 在同一聊天中直接要求 ChatGPT 基于刚生成的预览图识别复杂视觉元素并生成语义化 `layers.json`，不重复上传预览图。
 5. 按 80% 原生还原阈值优先从完整预览的源像素提取复杂视觉；大面积框架包含文字或按钮、无法直接分离时，由 ChatGPT 去字并补全遮挡区域。
-6. 将预览图、通过检查的透明独立素材和原生文字/几何图层同步到 Figma。
+6. 每个方向完成后立即进入独立 Figma 队列；上一方向写入和核验 Figma 时，下一方向可继续在 ChatGPT 生图和拆图。
 
 默认正式运行会采集 10 张参考图并生成 10 个原创方向：6 个弹窗、2 个 Banner、2 个浮窗，每个方向使用 1 张同类型参考图。
 
@@ -46,6 +46,7 @@ Finance Creative Pipeline 是一个面向中国互联网金融运营素材的 Co
 - 项目内聊天会显式命名为 `弹窗1` 至 `弹窗6`、`Banner1` 至 `Banner2`、`浮窗1` 至 `浮窗2`；编号在各素材类型内独立计算，验证运行中的每个类型从 1 开始。
 - 参考图使用 ChatGPT 图片专用上传控件；只有该方向 1 张附件的文件名、缩略图和发送状态全部验证通过后，才在同一条消息中要求 ChatGPT 内部理解参考图并直接生图。正常成功路径只上传 1 次，不请求中间分析、设计规格或可见提示词；普通生图重试复用聊天中的参考图，只有 ChatGPT 明确表示未收到图片时才重新上传。
 - 流水线从 `run.json` 和 `figma-manifest.json` 恢复，避免重复采集、重复生成和重复创建 Figma 日期分区。
+- `figma-manifest.json` 只由生成器写入；Figma 节点和逐方向 QA 状态独立保存在 `figma-sync-state.json`，以产物指纹防止重生成后误用旧同步结果。
 - 每次运行固定使用花瓣作为参考图来源。
 - 参考图按类型采集：弹窗、Banner、浮窗分别使用匹配的关键词池和数量配额，不混用搜索词。搜索词负责方向，尺寸和透明度负责基础过滤，ChatGPT Web 根据图片实际内容做最终判断；浮窗允许金融 3D 素材、插图、红包、金币、徽章或元素加按钮，花瓣标题只用于快速排除明确写着背景、模板、完整页面或其他行业的候选。
 - 每个缺失方向最多扫描 30 个未见 Pin，每个关键词最多取 3 个候选，最多临时下载 8 张；候选按每批最多 3 张放入当天项目中的类型筛选聊天，降低 ChatGPT 附件额度消耗。只有同时通过类型、完整成品、金融相关和最低 60 分的图片才会正式进入 `references/`；结构和可用性作为软性参考信号。数字、`元`、`¥/$/%`、金币、优惠券、仪表盘、红包、利息或息费都算金融相关线索，失败临时文件会删除并记录审核原因。
@@ -179,14 +180,14 @@ codex plugin add finance-creative-pipeline@<marketplace-name>
 
 | 状态 | 含义 |
 | --- | --- |
-| `running` | 本地采集、生成或分解正在进行 |
+| `running` | 本地采集、生成或分解正在进行；已发出 `direction_ready` 的方向可同时写入 Figma |
 | `collection_complete` | 仅采集测试已成功完成；生图、拆图和 Figma 均未开始 |
 | `collection_incomplete` | 仅采集测试未找到足量合格参考图；后续阶段未开始 |
 | `awaiting_figma` | ChatGPT 阶段结束，至少一个完整方向可以开始 Figma 同步；失败方向保留审计记录 |
 | `complete` | Figma 同步和视觉核验完成 |
 | `blocked` | 需要用户处理登录、验证码、权限或其他外部阻塞 |
 
-恢复任务时先读取已有 `run.json` 和 `figma-manifest.json`。如果本地阶段已经完成，只继续 Figma 同步，不要重新运行采集和生成。
+恢复任务时先读取已有 `run.json`、`figma-manifest.json` 和 `figma-sync-state.json`。运行器每完成一个方向就输出 `direction_ready`；Codex 可立即同步该方向，同时保持同一个本地运行进程继续生成下一方向。如果本地阶段已经完成，只排空尚未通过 QA 的 Figma 方向，不要重新运行采集和生成。
 
 参考采集先执行内容审核：每个缺失方向最多扫描 30 个候选、临时下载 8 张，每批最多 4 张且最多提交两次。直接预览生成、语义分层和逐素材透明 PNG 提取分别拥有独立的两次尝试，每次等待最多 5 分钟。最终失败方向保留在 `figma-manifest.json.failures`；只要存在完整 `ready` 方向，仍进入 `awaiting_figma` 并继续同步成功方向。登录失效、验证码、安全验证和权限问题会立即停止并通知用户。
 
@@ -196,6 +197,7 @@ codex plugin add finance-creative-pipeline@<marketplace-name>
 YYYY-MM-DD/
 ├── run.json
 ├── figma-manifest.json
+├── figma-sync-state.json
 ├── reference-rejections.json
 ├── reference-audit-chats.json
 ├── reference-audits/
@@ -217,6 +219,7 @@ YYYY-MM-DD/
 - `layers.json`：ChatGPT 输出的语义图层计划。
 - `decomposition-report.json`：每个独立素材的 Alpha、边界质量、警告和限制。
 - `layers/*.png`：通过质量检查的源像素素材或明确标记来源的 GPT 去字补全素材。
+- `figma-sync-state.json`：独立的逐方向 Figma 队列状态、产物指纹、Section/Frame 节点 ID、上传数和视觉 QA 结果。
 
 ### Figma 交付规范
 
@@ -237,6 +240,17 @@ YYYY-MM-DD/
 
 详细流程见 [`skills/finance-creative-pipeline/references/figma-sync.md`](skills/finance-creative-pipeline/references/figma-sync.md)。
 
+方向级同步使用独立状态命令，避免与仍在运行的生成器争写 manifest：
+
+```bash
+npm run figma-sync-progress -- inspect --date YYYY-MM-DD
+npm run figma-sync-progress -- section --date YYYY-MM-DD --section-id NODE_ID
+npm run figma-sync-progress -- start --date YYYY-MM-DD --direction 1
+npm run figma-sync-progress -- node --date YYYY-MM-DD --direction 1 --node-id NODE_ID
+npm run figma-sync-progress -- complete --date YYYY-MM-DD --direction 1 --uploaded-assets 3
+npm run mark-figma-complete -- --date YYYY-MM-DD
+```
+
 ### 常用命令
 
 ```bash
@@ -245,6 +259,7 @@ npm run test-run       # 1 张参考图、1 个方向的测试运行
 npm run test-three-types # 弹窗、Banner、浮窗各 1 个的隔离验证运行
 npm run test-transparent-assets -- --image /path/to/preview.png # 只测试透明素材拆分
 npm run find-remix-icon -- --query "shield check" --style line # 检索 Remix Icon SVG
+npm run figma-sync-progress -- inspect --date YYYY-MM-DD # 检查方向级 Figma 队列
 npm run run            # 10 张参考图、10 个方向的正式运行
 npm run run -- --visible # 显式强制可见模式，可覆盖诊断用 browser.mode 配置
 npm run check-missed   # 检查漏跑
@@ -425,12 +440,12 @@ Primary states:
 
 | State | Meaning |
 | --- | --- |
-| `running` | Local collection, generation, or decomposition is active |
+| `running` | Local work is active; emitted `direction_ready` entries may sync to Figma concurrently |
 | `awaiting_figma` | The ChatGPT phase is over and at least one complete direction can be synced; failures remain auditable |
 | `complete` | Figma sync and visual verification are complete |
 | `blocked` | Login, CAPTCHA, permissions, or another external issue requires user action |
 
-Always inspect the existing `run.json` and `figma-manifest.json` before resuming. If local generation is already complete, continue only the Figma stage.
+Always inspect `run.json`, `figma-manifest.json`, and `figma-sync-state.json` before resuming. Each completed direction emits `direction_ready` and may enter Figma while the same runtime continues generating the next direction. If local generation is already complete, drain only the remaining Figma queue.
 
 Reference collection scans at most 30 Pins and temporarily downloads at most eight images per missing direction. Content-audit batches contain at most four images and receive two submission attempts. Steps 6 through 9 retain independent two-attempt budgets with a five-minute limit per attempt. Remaining failures stay in `figma-manifest.json.failures`, while valid `ready` directions continue to Figma. Login expiry, CAPTCHA, security checks, and permission issues still stop immediately and notify the user.
 
@@ -440,6 +455,7 @@ Reference collection scans at most 30 Pins and temporarily downloads at most eig
 YYYY-MM-DD/
 ├── run.json
 ├── figma-manifest.json
+├── figma-sync-state.json
 ├── reference-rejections.json
 ├── reference-audit-chats.json
 ├── reference-audits/
@@ -459,6 +475,7 @@ YYYY-MM-DD/
 - `layers.json`: semantic layer plan produced by ChatGPT Web.
 - `decomposition-report.json`: per-asset Alpha and boundary metrics, warnings, and limitations.
 - `layers/*.png`: independently generated transparent assets accepted by the quality gate.
+- `figma-sync-state.json`: isolated per-direction Figma queue state, artifact fingerprints, node IDs, upload counts, and visual-QA results.
 
 The output root also keeps `reference-history.json` for accepted references and `reference-rejections.json` for content-rejected Pins and their audit reasons. Both ledgers are used to avoid repeating unsuitable results. On resume, a ready direction whose source was newly rejected by the daily re-audit is selectively regenerated with its replacement reference; unrelated complete directions remain reusable.
 
@@ -481,6 +498,8 @@ Popup editable canvases stay transparent and reconstruct only the popup card, sh
 
 See [`skills/finance-creative-pipeline/references/figma-sync.md`](skills/finance-creative-pipeline/references/figma-sync.md) for the full workflow.
 
+The producer exclusively owns `figma-manifest.json`. Incremental Figma work uses `figma-sync-state.json`, so manifest updates cannot overwrite node or QA progress. Artifact fingerprints reset a regenerated direction to pending while retaining its Frame ID for idempotent replacement.
+
 ### Commands
 
 ```bash
@@ -489,6 +508,7 @@ npm run test-run       # Test with 1 reference and 1 direction
 npm run test-three-types # Isolated validation with one popup, Banner, and float
 npm run test-transparent-assets -- --image /path/to/preview.png # Test transparent separation only
 npm run find-remix-icon -- --query "shield check" --style line # Search Remix Icon SVGs
+npm run figma-sync-progress -- inspect --date YYYY-MM-DD # Inspect the per-direction Figma queue
 npm run run            # Normal 10-reference, 10-direction run
 npm run run -- --visible # Explicitly force visible mode, overriding diagnostic browser.mode settings
 npm run check-missed   # Check for a missed scheduled run

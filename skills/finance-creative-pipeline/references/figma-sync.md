@@ -1,6 +1,6 @@
 # Figma sync
 
-Use this reference only after a local run has produced `figma-manifest.json`.
+Use this reference as soon as the local runtime emits `direction_ready`. The producer may still be generating the next direction.
 
 ## Preconditions
 
@@ -11,6 +11,17 @@ Use this reference only after a local run has produced `figma-manifest.json`.
 - Read every ready direction's `layers.json` and `layers/decomposition-report.json`. Treat confidence and warnings as evidence, not optional notes.
 - Use `fileKey` and `pageId` from the manifest. Do not guess them.
 - Inspect the page and existing date sections before writing.
+- Never write Figma progress into `figma-manifest.json`; the still-running producer owns that file. Use only `figma-sync-state.json` through the bundled progress CLI.
+
+## Incremental queue
+
+1. Run `node scripts/figma-sync-progress.mjs inspect --date YYYY-MM-DD` after each `direction_ready` event. A new or artifact-changed direction appears as `pending`; an unchanged `qa_passed` direction must be skipped.
+2. Create or reuse the single dated Section, then persist its ID with `node scripts/figma-sync-progress.mjs section --date YYYY-MM-DD --section-id NODE_ID --section-name "YYYY-MM-DD 自动采集"`.
+3. Before writing one direction, run `node scripts/figma-sync-progress.mjs start --date YYYY-MM-DD --direction N`. This binds the attempt to the current preview/layers/report revision.
+4. Create or reuse the direction Frame, then immediately persist its ID with `node scripts/figma-sync-progress.mjs node --date YYYY-MM-DD --direction N --node-id NODE_ID` before adding children. This makes a mid-sync restart reuse the same Frame.
+5. Build and screenshot that direction using the sequence below. Generation of the next direction may continue concurrently in the existing runtime process.
+6. After visual QA passes, run `node scripts/figma-sync-progress.mjs complete --date YYYY-MM-DD --direction N --uploaded-assets N`. If writing or QA fails, run the same command with `fail` and `--message "REASON"` instead of claiming success.
+7. If the direction's artifacts change later, `inspect` resets that direction to `pending` while retaining its previous Frame ID for in-place replacement. Never create a duplicate direction Frame.
 
 ## Structure
 
@@ -56,4 +67,4 @@ Use Remix Icon only for ordinary functional or informational icons. Logos, brand
 
 ## Completion
 
-Run `node scripts/mark-figma-complete.mjs --date YYYY-MM-DD --section-id NODE_ID --section-name "SECTION_NAME" --direction-ids ID1,ID2 --uploaded-assets N` only after every right-side reconstruction passes the visual gate above. Record the section node ID, all direction node IDs, uploaded asset count, and `stages.figma = "complete"`. Record whether each direction is `visual_fidelity` or `editable_reconstruction` based on its decomposition report. Do not delete source files after sync.
+Run `node scripts/mark-figma-complete.mjs --date YYYY-MM-DD` only after the local runtime has reached `awaiting_figma` and every current ready direction has a matching `qa_passed` artifact revision. The command derives the Section ID, direction IDs, and uploaded asset count from `figma-sync-state.json`; it refuses stale or incomplete work. Record whether each direction is `visual_fidelity` or `editable_reconstruction` based on its decomposition report. Do not delete source files after sync.
