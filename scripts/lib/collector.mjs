@@ -493,7 +493,27 @@ function detailImageCandidates(images) {
     });
 }
 
-export async function resolveDetailImageUrls(page, item) {
+export function exposedImageWidthHint(url) {
+  const value = String(url || "");
+  const pathHint = value.match(/(?:_|-)fw(\d{2,5})/i)?.[1];
+  const queryHint = value.match(/[?&](?:w|width)=(\d{2,5})(?:&|$)/i)?.[1];
+  return Number(pathHint || queryHint || 0);
+}
+
+export function selectHighestExposedImage(urls, naturalWidth = 0, naturalHeight = 0) {
+  const unique = [...new Set((urls || []).filter(Boolean))];
+  const imageUrl = unique.reduce((best, current) => (
+    exposedImageWidthHint(current) > exposedImageWidthHint(best) ? current : best
+  ), unique[0] || null);
+  const hintedWidth = exposedImageWidthHint(imageUrl);
+  const width = Math.max(Number(naturalWidth || 0), hintedWidth);
+  const height = naturalWidth && naturalHeight && width
+    ? Math.round(Number(naturalHeight) * width / Number(naturalWidth))
+    : Number(naturalHeight || 0);
+  return { imageUrl, width, height };
+}
+
+export async function resolveDetailImageCandidate(page, item) {
   const listImageUrls = [item.listImageUrl].filter(Boolean);
   const response = await page.goto(item.sourceUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
   await page.waitForTimeout(1200);
@@ -549,7 +569,18 @@ export async function resolveDetailImageUrls(page, item) {
   if (!main) {
     throw new Error(`Pin ${item.pinId} 详情页未找到可见主图`);
   }
-  return [...new Set([...main.urls, ...listImageUrls].filter(Boolean))];
+  const urls = [...new Set([...main.urls, ...listImageUrls].filter(Boolean))];
+  const selected = selectHighestExposedImage(urls, main.naturalWidth, main.naturalHeight);
+  return {
+    imageUrl: selected.imageUrl,
+    urls,
+    width: selected.width || Math.round(main.displayWidth),
+    height: selected.height || Math.round(main.displayHeight)
+  };
+}
+
+export async function resolveDetailImageUrls(page, item) {
+  return (await resolveDetailImageCandidate(page, item)).urls;
 }
 
 async function downloadBestImage(context, item, urls, targetFile, minWidth, browserPage = null) {
@@ -575,7 +606,7 @@ async function downloadBestImage(context, item, urls, targetFile, minWidth, brow
 }
 
 export function referenceCollectionRequiresUserAction(error) {
-  return /登录|验证码|安全验证|异常访问|访问被阻止|权限|account session|access denied|captcha|waf/i
+  return /登录|验证码|安全验证|异常访问|访问被阻止|权限|account session|access denied|captcha|waf|连续\s*2\s*次失败[\s\S]*提示词已填写但未能提交/i
     .test(String(error?.message || error));
 }
 
@@ -722,7 +753,7 @@ export async function collectReferences({
   const minWidth = Math.max(1, Number(config.collection.minReferenceWidthPx || 720));
   const maxSearchScrolls = Math.max(1, Number(config.collection.maxSearchScrolls || 20));
   const maxCandidatesPerKeyword = Math.max(1, Number(config.collection.maxCandidatesPerKeyword || 3));
-  const visualReviewBatchSize = Math.max(1, Math.min(3, Number(config.collection.visualReviewBatchSize || 3)));
+  const visualReviewBatchSize = Math.max(1, Math.min(5, Number(config.collection.visualReviewBatchSize || 5)));
   const visualReviewMaxAttempts = Math.max(1, Number(config.collection.visualReviewMaxAttempts || 2));
   const plans = buildSearchPlans(config.collection, count, date);
   const rejectionState = await loadReferenceRejections(config.outputRoot, runDir);
@@ -757,7 +788,7 @@ export async function collectReferences({
 
       const flushReviewQueue = async () => {
         if (!reviewQueue.length || acceptedForType >= plan.count) {
-          while (reviewQueue.length) await fs.unlink(reviewQueue.shift().file).catch(() => {});
+          reviewQueue.length = 0;
           return;
         }
         const batch = reviewQueue.splice(0, visualReviewBatchSize);
@@ -770,7 +801,6 @@ export async function collectReferences({
             attempts: visualReviewMaxAttempts
           });
         } catch (error) {
-          for (const candidate of batch) await fs.unlink(candidate.file).catch(() => {});
           if (referenceCollectionRequiresUserAction(error)) throw error;
           console.warn(`${plan.type} 候选批次内容审核失败，已跳过该批并继续：${error.message}`);
           return;
@@ -778,21 +808,79 @@ export async function collectReferences({
         reviewed.sort((left, right) => Number(right.audit.score || 0) - Number(left.audit.score || 0));
         for (const { candidate, audit } of reviewed) {
           if (audit.accepted && acceptedForType < plan.count) {
-            const extension = candidate.format === "png" ? "png" : candidate.format === "webp" ? "webp" : "jpg";
-            const file = path.join(referencesDir, `${String(nextReferenceIndex).padStart(2, "0")}-${candidate.pinId}.${extension}`);
-            nextReferenceIndex += 1;
-            await fs.rename(candidate.file, file);
-            const record = {
-              ...candidate,
-              file,
-              contentAudit: audit,
-              collectedAt: new Date().toISOString()
-            };
-            delete record.format;
-            results.push(record);
-            acceptedForType += 1;
-            await appendReferenceHistory(history, record, date);
-            await writeJsonAtomic(path.join(runDir, "references.json"), results);
+            if (downloadedCandidates >= budgets.downloaded) continue;
+            downloadedCandidates += 1;
+            const downloadFile = path.join(referencesDir, `.download-${sourceProvider}-${candidate.pinId}`);
+            let finalFile = null;
+            try {
+              const downloaded = await downloadBestImage(
+                context,
+                candidate,
+                candidate.imageUrls,
+                downloadFile,
+                minimumReferenceWidth(plan.type, minWidth),
+                detailPage
+              );
+              const { buffer, metadata, imageUrl, fileSize } = downloaded;
+              const visualAudit = await assessReferenceVisual(plan.type, buffer);
+              if (!visualAudit.accepted) {
+                await recordReferenceRejection(rejectionState, {
+                  pinId: candidate.pinId,
+                  referenceType: plan.type,
+                  title: candidate.title,
+                  sourceUrl: candidate.sourceUrl,
+                  imageUrl: candidate.imageUrl,
+                  searchKeyword: candidate.searchKeyword,
+                  stage: "visual",
+                  reasons: visualAudit.reasons,
+                  metrics: visualAudit.metrics
+                });
+                console.warn(`跳过 Pin ${candidate.pinId}：${visualAudit.reasons.join("；")}`);
+                continue;
+              }
+              const sha256 = crypto.createHash("sha256").update(buffer).digest("hex");
+              const ahash = await averageHash(buffer);
+              if (isSameImage({ sha256, ahash, width: metadata.width, height: metadata.height }, [...history.references, ...results])) {
+                continue;
+              }
+              const extension = metadata.format === "png" ? "png" : metadata.format === "webp" ? "webp" : "jpg";
+              const destination = path.join(referencesDir, `${String(nextReferenceIndex).padStart(2, "0")}-${candidate.pinId}.${extension}`);
+              nextReferenceIndex += 1;
+              await fs.rename(downloadFile, destination);
+              finalFile = destination;
+              const record = {
+                ...candidate,
+                imageUrl,
+                file: finalFile,
+                width: metadata.width,
+                height: metadata.height,
+                fileSize,
+                sha256,
+                ahash,
+                contentAudit: audit,
+                collectedAt: new Date().toISOString()
+              };
+              delete record.imageUrls;
+              results.push(record);
+              acceptedForType += 1;
+              await appendReferenceHistory(history, record, date);
+              await writeJsonAtomic(path.join(runDir, "references.json"), results);
+            } catch (error) {
+              if (referenceCollectionRequiresUserAction(error)) throw error;
+              await recordReferenceRejection(rejectionState, {
+                pinId: candidate.pinId,
+                referenceType: plan.type,
+                title: candidate.title,
+                sourceUrl: candidate.sourceUrl,
+                imageUrl: candidate.imageUrl,
+                searchKeyword: candidate.searchKeyword,
+                stage: "technical",
+                reasons: [error.message]
+              });
+              console.warn(`跳过 Pin ${candidate.pinId}：${error.message}`);
+            } finally {
+              if (!finalFile) await fs.unlink(downloadFile).catch(() => {});
+            }
             continue;
           }
           if (!audit.accepted) {
@@ -801,15 +889,29 @@ export async function collectReferences({
               referenceType: plan.type,
               title: candidate.title,
               sourceUrl: candidate.sourceUrl,
+              imageUrl: candidate.imageUrl,
               searchKeyword: candidate.searchKeyword,
               stage: "content",
               reasons: audit.reasons,
               metrics: audit
             });
           }
-          await fs.unlink(candidate.file).catch(() => {});
         }
       };
+
+      const auditState = await readJson(path.join(runDir, "reference-audit-chats.json"), { chats: {} });
+      const pendingCandidates = Array.isArray(auditState.chats?.[plan.type]?.pendingCandidates)
+        ? auditState.chats[plan.type].pendingCandidates
+        : [];
+      for (const candidate of pendingCandidates) {
+        if (!candidate?.pinId || !candidate?.imageUrl || candidate.referenceType !== plan.type) continue;
+        reviewQueue.push(candidate);
+        attemptedPinIds.add(String(candidate.pinId));
+      }
+      if (reviewQueue.length) {
+        scannedCandidates += reviewQueue.length;
+        await flushReviewQueue();
+      }
 
       while (acceptedForType < plan.count
         && scannedCandidates < budgets.scanned
@@ -855,65 +957,29 @@ export async function collectReferences({
             console.warn(`跳过 Pin ${candidate.pinId}：${titleAudit.reasons.join("；")}`);
             continue;
           }
-          downloadedCandidates += 1;
-          const downloadFile = path.join(referencesDir, `.download-${sourceProvider}-${candidate.pinId}`);
-          let candidateFile = downloadFile;
           try {
-            const urls = await resolveDetailImageUrls(detailPage, candidate);
-            const downloaded = await downloadBestImage(
-              context,
-              candidate,
-              urls,
-              downloadFile,
-              minimumReferenceWidth(plan.type, minWidth),
-              detailPage
-            );
-            const { buffer, metadata, imageUrl, fileSize } = downloaded;
-            const visualAudit = await assessReferenceVisual(plan.type, buffer);
-            if (!visualAudit.accepted) {
-              await recordReferenceRejection(rejectionState, {
-                pinId: candidate.pinId,
-                referenceType: plan.type,
-                title: candidate.title,
-                sourceUrl: candidate.sourceUrl,
-                searchKeyword: query,
-                stage: "visual",
-                reasons: visualAudit.reasons,
-                metrics: visualAudit.metrics
-              });
-              await fs.unlink(downloadFile).catch(() => {});
-              console.warn(`跳过 Pin ${candidate.pinId}：${visualAudit.reasons.join("；")}`);
-              continue;
+            const resolved = await resolveDetailImageCandidate(detailPage, candidate);
+            const minimumWidth = minimumReferenceWidth(plan.type, minWidth);
+            if (resolved.width < minimumWidth) {
+              throw new Error(`Pin ${candidate.pinId} 最佳可见图片仅 ${resolved.width}x${resolved.height}，低于 ${minimumWidth}px 宽度门槛`);
             }
-            const sha256 = crypto.createHash("sha256").update(buffer).digest("hex");
-            const ahash = await averageHash(buffer);
-            const duplicatePool = [...history.references, ...results, ...reviewQueue];
-            if (isSameImage({ sha256, ahash, width: metadata.width, height: metadata.height }, duplicatePool)) {
-              await fs.unlink(downloadFile).catch(() => {});
-              continue;
+            if (plan.type === "banner" && resolved.width / resolved.height < 1.5) {
+              throw new Error("画面不是横向 Banner 成品，宽高比低于 1.5");
             }
-            const extension = metadata.format === "png" ? "png" : metadata.format === "webp" ? "webp" : "jpg";
-            candidateFile = path.join(referencesDir, `.candidate-${sourceProvider}-${plan.type}-${candidate.pinId}.${extension}`);
-            await fs.rename(downloadFile, candidateFile);
             reviewQueue.push({
               ...candidate,
               referenceType: plan.type,
-              imageUrl,
-              file: candidateFile,
-              width: metadata.width,
-              height: metadata.height,
-              fileSize,
+              imageUrl: resolved.imageUrl,
+              imageUrls: resolved.urls,
+              width: resolved.width,
+              height: resolved.height,
               searchKeyword: query,
-              sha256,
-              ahash,
-              format: metadata.format,
               titleAudit
             });
             if (reviewQueue.length >= visualReviewBatchSize) await flushReviewQueue();
           } catch (error) {
-            await fs.unlink(candidateFile).catch(() => {});
             if (referenceCollectionRequiresUserAction(error)) throw error;
-            if (/低于\s*\d+px\s*宽度门槛/.test(error.message)) {
+            if (/低于\s*\d+px\s*宽度门槛|宽高比低于/.test(error.message)) {
               await recordReferenceRejection(rejectionState, {
                 pinId: candidate.pinId,
                 referenceType: plan.type,
@@ -930,7 +996,7 @@ export async function collectReferences({
       }
       await flushReviewQueue();
       if (acceptedForType < plan.count) {
-        console.warn(`${plan.type} 参考图仅采集到 ${acceptedForType}/${plan.count}；已扫描 ${scannedCandidates}/${budgets.scanned} 个候选并临时下载验证 ${downloadedCandidates}/${budgets.downloaded} 张，跳过缺失方向并继续`);
+        console.warn(`${plan.type} 参考图仅采集到 ${acceptedForType}/${plan.count}；已扫描 ${scannedCandidates}/${budgets.scanned} 个候选，审核通过后下载验证 ${downloadedCandidates}/${budgets.downloaded} 张，跳过缺失方向并继续`);
       }
     }
   } finally {

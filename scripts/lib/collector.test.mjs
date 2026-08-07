@@ -9,6 +9,7 @@ import {
   buildSearchPlans,
   buildSearchPlansForTypes,
   collectionCandidateBudgets,
+  exposedImageWidthHint,
   isSameImage,
   looksLikeBlockedPage,
   minimumReferenceWidth,
@@ -16,6 +17,7 @@ import {
   referenceCollectionRequiresUserAction,
   referenceIdentityKey,
   referenceProvider,
+  selectHighestExposedImage,
   selectAvailableReferencesForPlans,
   selectReferencesForPlans
 } from "./collector.mjs";
@@ -23,6 +25,8 @@ import {
 test("reference collection security blockers stop the workflow globally", () => {
   assert.equal(referenceCollectionRequiresUserAction(new Error("花瓣详情页要求安全验证")), true);
   assert.equal(referenceCollectionRequiresUserAction(new Error("花瓣验证码待处理")), true);
+  assert.equal(referenceCollectionRequiresUserAction(new Error("float 参考图内容审核连续 2 次失败：ChatGPT 提示词已填写但未能提交")), true);
+  assert.equal(referenceCollectionRequiresUserAction(new Error("ChatGPT 提示词已填写但未能提交")), false);
   assert.equal(referenceCollectionRequiresUserAction(new Error("Pin 详情页图片下载失败")), false);
 });
 
@@ -111,6 +115,20 @@ test("float references do not inherit the normal minimum-width gate", () => {
   assert.equal(minimumReferenceWidth("float", 720), 1);
   assert.equal(minimumReferenceWidth("popup", 720), 720);
   assert.equal(minimumReferenceWidth("banner", 720), 720);
+});
+
+test("detail-page URL selection prefers the highest exposed Huaban rendition", () => {
+  const urls = [
+    "https://gd-hbimg-edge.huaban.com/key_fw240webp?auth_key=x",
+    "https://gd-hbimg-edge.huaban.com/key_fw658webp?auth_key=x",
+    "https://gd-hbimg-edge.huaban.com/key_fw1200webp?auth_key=x"
+  ];
+  assert.equal(exposedImageWidthHint(urls[2]), 1200);
+  assert.deepEqual(selectHighestExposedImage(urls, 658, 1425), {
+    imageUrl: urls[2],
+    width: 1200,
+    height: 2599
+  });
 });
 
 test("float titles allow standalone finance elements and reject obvious unrelated assets", () => {

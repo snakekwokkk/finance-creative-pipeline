@@ -1,6 +1,6 @@
 {
   "name": "finance-creative-pipeline",
-  "version": "1.5.0+codex.20260807063014",
+  "version": "1.5.1+codex.20260807080954",
   "description": "Collect finance creative references, generate one original preview per direction through ChatGPT Web, and organize native editable outputs in Figma.",
   "author": {
     "name": "Snake"

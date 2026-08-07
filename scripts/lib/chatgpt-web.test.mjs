@@ -28,6 +28,7 @@ import {
   projectBaseUrl,
   readyDirectionsForFigma,
   referenceAuditChatTitle,
+  referenceAuditChatBootstrapPrompt,
   referenceAuditPrompt,
   reconstructedAssetPrompt,
   recordDirectionFailure,
@@ -174,31 +175,40 @@ test("prompt submission requires observable composer, message, or URL evidence",
 test("reference content audits live in dated-project chats and rely on image content", () => {
   assert.equal(referenceAuditChatTitle("popup"), "采集筛选-弹窗");
   assert.equal(referenceAuditChatTitle("banner"), "采集筛选-Banner");
+  assert.match(referenceAuditChatBootstrapPrompt("采集筛选-弹窗"), /REFERENCE_AUDIT_READY/);
   const candidates = [
-    { pinId: "p1", file: "/tmp/candidate-p1.webp", title: "IMG_4953", searchKeyword: "借贷 活动弹窗", width: 900, height: 1600 },
-    { pinId: "p2", file: "/tmp/candidate-p2.webp", title: "促销元素", searchKeyword: "借贷 活动弹窗", width: 800, height: 800 }
+    { pinId: "p1", imageUrl: "https://img.example/p1.webp", title: "IMG_4953", searchKeyword: "借贷 活动弹窗", width: 900, height: 1600 },
+    { pinId: "p2", imageUrl: "https://img.example/p2.webp", title: "促销元素", searchKeyword: "借贷 活动弹窗", width: 800, height: 800 }
   ];
   const prompt = referenceAuditPrompt("popup", candidates);
+  assert.match(prompt, /public|imageUrl|公开/);
+  assert.match(prompt, /imageAccessible/);
   assert.match(prompt, /最终结论必须以图片实际内容为主/);
   assert.match(prompt, /拒绝背景、按钮、优惠券、金币、图标、装饰元素/);
   assert.match(prompt, /financeRelevant 50%/);
   assert.match(prompt, /阿拉伯数字、汉字“元”、¥、\$、%、金币、优惠券、仪表盘、红包、利息\/息费/);
   assert.doesNotMatch(prompt, /真实品牌Logo、二维码、其他行业、夸大金融承诺/);
-  assert.match(prompt, /candidate-p1\.webp/);
+  assert.match(prompt, /https:\/\/img\.example\/p1\.webp/);
+  assert.doesNotMatch(prompt, /上传的候选图片|附件文件名/);
 
   const floatPrompt = referenceAuditPrompt("float", candidates);
   assert.match(floatPrompt, /3D素材/);
   assert.match(floatPrompt, /主体本身完整可提取/);
 
   const parsed = parseReferenceAudit(`REFERENCE_AUDIT_START
-{"candidates":[{"pinId":"p1","filename":"candidate-p1.webp","typeMatch":true,"completeDesign":true,"financeRelevant":true,"structureValid":true,"usableReference":true,"score":88,"reasons":["完整金融弹窗"]},{"pinId":"p2","filename":"candidate-p2.webp","typeMatch":false,"completeDesign":false,"financeRelevant":false,"structureValid":false,"usableReference":false,"score":20,"reasons":["只是原子元素"]}]}
+{"candidates":[{"pinId":"p1","imageAccessible":true,"typeMatch":true,"completeDesign":true,"financeRelevant":true,"structureValid":true,"usableReference":true,"score":88,"reasons":["完整金融弹窗"]},{"pinId":"p2","imageAccessible":true,"typeMatch":false,"completeDesign":false,"financeRelevant":false,"structureValid":false,"usableReference":false,"score":20,"reasons":["只是原子元素"]}]}
 REFERENCE_AUDIT_END`, candidates);
   assert.equal(parsed.candidates[0].accepted, true);
   assert.equal(parsed.candidates[1].accepted, false);
   const softSignals = parseReferenceAudit(`REFERENCE_AUDIT_START
-{"candidates":[{"pinId":"p1","typeMatch":true,"completeDesign":true,"financeRelevant":true,"structureValid":false,"usableReference":false,"score":60}]}
+{"candidates":[{"pinId":"p1","imageAccessible":true,"typeMatch":true,"completeDesign":true,"financeRelevant":true,"structureValid":false,"usableReference":false,"score":60}]}
 REFERENCE_AUDIT_END`, [candidates[0]], 60);
   assert.equal(softSignals.candidates[0].accepted, true);
+  const inaccessible = parseReferenceAudit(`REFERENCE_AUDIT_START
+{"candidates":[{"pinId":"p1","imageAccessible":false,"typeMatch":true,"completeDesign":true,"financeRelevant":true,"structureValid":true,"usableReference":true,"score":99,"accessNote":"访问超时"}]}
+REFERENCE_AUDIT_END`, [candidates[0]], 60);
+  assert.equal(inaccessible.candidates[0].accepted, false);
+  assert.deepEqual(inaccessible.candidates[0].reasons, ["访问超时"]);
   assert.throws(() => parseReferenceAudit(`REFERENCE_AUDIT_START
 {"candidates":[{"pinId":"p1","score":90}]}
 REFERENCE_AUDIT_END`, candidates), /漏掉候选/);
@@ -206,8 +216,8 @@ REFERENCE_AUDIT_END`, candidates), /漏掉候选/);
 
 test("reference audit marker listener finds the completed matching batch", () => {
   const candidates = [
-    { pinId: "p1", file: "/tmp/candidate-p1.webp" },
-    { pinId: "p2", file: "/tmp/candidate-p2.webp" }
+    { pinId: "p1", imageUrl: "https://img.example/p1.webp" },
+    { pinId: "p2", imageUrl: "https://img.example/p2.webp" }
   ];
   const promptExample = `REFERENCE_AUDIT_START
 {"candidates":[{"pinId":"候选Pin ID","score":85}]}
@@ -216,7 +226,7 @@ REFERENCE_AUDIT_END`;
 {"candidates":[{"pinId":"old-pin","typeMatch":true,"completeDesign":true,"financeRelevant":true,"score":90}]}
 REFERENCE_AUDIT_END`;
   const completed = `REFERENCE_AUDIT_START
-{"candidates":[{"pinId":"p1","typeMatch":true,"completeDesign":true,"financeRelevant":true,"structureValid":true,"usableReference":true,"score":88},{"pinId":"p2","typeMatch":false,"completeDesign":false,"financeRelevant":false,"structureValid":false,"usableReference":true,"score":25}]}
+{"candidates":[{"pinId":"p1","imageAccessible":true,"typeMatch":true,"completeDesign":true,"financeRelevant":true,"structureValid":true,"usableReference":true,"score":88},{"pinId":"p2","imageAccessible":true,"typeMatch":false,"completeDesign":false,"financeRelevant":false,"structureValid":false,"usableReference":true,"score":25}]}
 REFERENCE_AUDIT_END`;
 
   assert.equal(referenceAuditJsonResponses(`${promptExample}\n${unrelated}`, candidates).length, 0);
@@ -231,12 +241,12 @@ REFERENCE_AUDIT_END`;
 });
 
 test("reference audit recovery ignores incomplete JSON and selects the newest valid result", () => {
-  const candidates = [{ pinId: "p1", file: "/tmp/candidate-p1.webp" }];
+  const candidates = [{ pinId: "p1", imageUrl: "https://img.example/p1.webp" }];
   const first = `REFERENCE_AUDIT_START
-{"candidates":[{"pinId":"p1","typeMatch":true,"completeDesign":true,"financeRelevant":true,"score":70}]}
+{"candidates":[{"pinId":"p1","imageAccessible":true,"typeMatch":true,"completeDesign":true,"financeRelevant":true,"score":70}]}
 REFERENCE_AUDIT_END`;
   const second = `REFERENCE_AUDIT_START
-{"candidates":[{"pinId":"p1","typeMatch":true,"completeDesign":true,"financeRelevant":true,"score":92}]}
+{"candidates":[{"pinId":"p1","imageAccessible":true,"typeMatch":true,"completeDesign":true,"financeRelevant":true,"score":92}]}
 REFERENCE_AUDIT_END`;
   const incomplete = "REFERENCE_AUDIT_START\n{\"candidates\":[";
 
