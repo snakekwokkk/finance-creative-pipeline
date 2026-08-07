@@ -35,6 +35,8 @@ import {
   generationReferenceReceiptValid,
   generationReferenceUploadRequired,
   latestNewDecompositionResponse,
+  latestReferenceAuditResponse,
+  referenceAuditJsonResponses,
   requiresUserAction,
   rasterNeedsReconstruction,
   runDecompositionAttempts,
@@ -200,6 +202,49 @@ REFERENCE_AUDIT_END`, [candidates[0]], 60);
   assert.throws(() => parseReferenceAudit(`REFERENCE_AUDIT_START
 {"candidates":[{"pinId":"p1","score":90}]}
 REFERENCE_AUDIT_END`, candidates), /漏掉候选/);
+});
+
+test("reference audit marker listener finds the completed matching batch", () => {
+  const candidates = [
+    { pinId: "p1", file: "/tmp/candidate-p1.webp" },
+    { pinId: "p2", file: "/tmp/candidate-p2.webp" }
+  ];
+  const promptExample = `REFERENCE_AUDIT_START
+{"candidates":[{"pinId":"候选Pin ID","score":85}]}
+REFERENCE_AUDIT_END`;
+  const unrelated = `REFERENCE_AUDIT_START
+{"candidates":[{"pinId":"old-pin","typeMatch":true,"completeDesign":true,"financeRelevant":true,"score":90}]}
+REFERENCE_AUDIT_END`;
+  const completed = `REFERENCE_AUDIT_START
+{"candidates":[{"pinId":"p1","typeMatch":true,"completeDesign":true,"financeRelevant":true,"structureValid":true,"usableReference":true,"score":88},{"pinId":"p2","typeMatch":false,"completeDesign":false,"financeRelevant":false,"structureValid":false,"usableReference":true,"score":25}]}
+REFERENCE_AUDIT_END`;
+
+  assert.equal(referenceAuditJsonResponses(`${promptExample}\n${unrelated}`, candidates).length, 0);
+  const response = latestReferenceAuditResponse([
+    `用户提示\n${promptExample}`,
+    `历史助手回复\n${unrelated}`,
+    `最新助手回复\n${completed}`
+  ], candidates);
+  assert.ok(response);
+  assert.equal(response.audit.candidates[0].accepted, true);
+  assert.equal(response.audit.candidates[1].accepted, false);
+});
+
+test("reference audit recovery ignores incomplete JSON and selects the newest valid result", () => {
+  const candidates = [{ pinId: "p1", file: "/tmp/candidate-p1.webp" }];
+  const first = `REFERENCE_AUDIT_START
+{"candidates":[{"pinId":"p1","typeMatch":true,"completeDesign":true,"financeRelevant":true,"score":70}]}
+REFERENCE_AUDIT_END`;
+  const second = `REFERENCE_AUDIT_START
+{"candidates":[{"pinId":"p1","typeMatch":true,"completeDesign":true,"financeRelevant":true,"score":92}]}
+REFERENCE_AUDIT_END`;
+  const incomplete = "REFERENCE_AUDIT_START\n{\"candidates\":[";
+
+  assert.equal(latestReferenceAuditResponse([incomplete], candidates), null);
+  assert.equal(
+    latestReferenceAuditResponse([`${first}\n${incomplete}\n${second}`], candidates)?.audit.candidates[0].score,
+    92
+  );
 });
 
 test("direct popup generation internally analyzes one attachment and outputs only an image", () => {

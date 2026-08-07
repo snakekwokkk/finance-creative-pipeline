@@ -27,15 +27,44 @@ function extractMarkedJson(text, start, end) {
   return JSON.parse(candidate.trim());
 }
 
+function markedJsonBlocks(text, start, end) {
+  const source = String(text || "");
+  const blocks = [];
+  let cursor = 0;
+  while (cursor < source.length) {
+    const startIndex = source.indexOf(start, cursor);
+    if (startIndex < 0) break;
+    const contentStart = startIndex + start.length;
+    const nextStart = source.indexOf(start, contentStart);
+    const endIndex = source.indexOf(end, contentStart);
+    if (endIndex < 0) {
+      if (nextStart >= 0) {
+        cursor = nextStart;
+        continue;
+      }
+      break;
+    }
+    if (nextStart >= 0 && nextStart < endIndex) {
+      cursor = nextStart;
+      continue;
+    }
+    blocks.push({
+      text: source.slice(startIndex, endIndex + end.length),
+      json: source.slice(contentStart, endIndex)
+    });
+    cursor = endIndex + end.length;
+  }
+  return blocks;
+}
+
 export function decompositionJsonResponses(text) {
   const responses = [];
-  const pattern = /DECOMPOSE_START\s*([\s\S]*?)\s*DECOMPOSE_END/g;
-  for (const match of String(text || "").matchAll(pattern)) {
+  for (const block of markedJsonBlocks(text, "DECOMPOSE_START", "DECOMPOSE_END")) {
     try {
-      const payload = JSON.parse(match[1].trim());
+      const payload = JSON.parse(block.json.trim());
       if (Number(payload?.schemaVersion || 0) < 4 || !Array.isArray(payload?.layers) || !payload.layers.length) continue;
       responses.push({
-        text: match[0],
+        text: block.text,
         payload,
         key: JSON.stringify(payload)
       });
@@ -55,6 +84,36 @@ export function latestNewDecompositionResponse(texts, knownKeys = new Set()) {
     }
   }
   return responses.reverse().find((response) => !knownKeys.has(response.key)) || null;
+}
+
+export function referenceAuditJsonResponses(text, candidates, minimumScore = 60) {
+  const responses = [];
+  for (const block of markedJsonBlocks(text, "REFERENCE_AUDIT_START", "REFERENCE_AUDIT_END")) {
+    try {
+      const payload = JSON.parse(block.json.trim());
+      const audit = parseReferenceAudit(block.text, candidates, minimumScore);
+      responses.push({
+        text: block.text,
+        payload,
+        audit,
+        key: JSON.stringify(payload)
+      });
+    } catch {}
+  }
+  return responses;
+}
+
+export function latestReferenceAuditResponse(texts, candidates, minimumScore = 60) {
+  const seen = new Set();
+  const responses = [];
+  for (const text of texts || []) {
+    for (const response of referenceAuditJsonResponses(text, candidates, minimumScore)) {
+      if (seen.has(response.key)) continue;
+      seen.add(response.key);
+      responses.push(response);
+    }
+  }
+  return responses.at(-1) || null;
 }
 
 async function composer(page) {
@@ -604,7 +663,7 @@ async function waitForAssistantText(page, previousCount, timeout) {
   throw error;
 }
 
-async function decompositionTextSnapshots(page) {
+async function conversationTextSnapshots(page) {
   const snapshots = [];
   const selectors = [
     '[data-message-author-role="assistant"]',
@@ -623,12 +682,33 @@ async function waitForDecompositionResponse(page, knownKeys, timeout) {
   const started = Date.now();
   while (Date.now() - started < timeout) {
     if (page.isClosed()) throw new Error("ChatGPT 页面已关闭，无法继续等待语义分层结果");
-    const response = latestNewDecompositionResponse(await decompositionTextSnapshots(page), knownKeys);
+    const response = latestNewDecompositionResponse(await conversationTextSnapshots(page), knownKeys);
     if (response) return response;
     await page.waitForTimeout(500);
   }
   const error = new Error(`等待 ChatGPT 语义分层标记超时（${Math.round(timeout / 1000)} 秒）`);
   error.code = "CHATGPT_DECOMPOSITION_TIMEOUT";
+  throw error;
+}
+
+async function currentReferenceAuditResponse(page, candidates, minimumScore) {
+  return latestReferenceAuditResponse(
+    await conversationTextSnapshots(page),
+    candidates,
+    minimumScore
+  );
+}
+
+async function waitForReferenceAuditResponse(page, candidates, minimumScore, timeout) {
+  const started = Date.now();
+  while (Date.now() - started < timeout) {
+    if (page.isClosed()) throw new Error("ChatGPT 页面已关闭，无法继续等待参考图内容审核结果");
+    const response = await currentReferenceAuditResponse(page, candidates, minimumScore);
+    if (response) return response;
+    await page.waitForTimeout(500);
+  }
+  const error = new Error(`等待 ChatGPT 参考图内容审核标记超时（${Math.round(timeout / 1000)} 秒）`);
+  error.code = "CHATGPT_REFERENCE_AUDIT_TIMEOUT";
   throw error;
 }
 
@@ -710,15 +790,16 @@ export async function reviewReferenceCandidates({ page, project, config, runDir,
   const saved = state.chats[chatKey];
   const title = referenceAuditChatTitle(type, provider);
   await openDirectionChat(page, project, saved?.url || null);
-  const files = candidates.map((item) => item.file);
-  await attachFiles(page, files);
   const timeout = minuteTimeout(config?.collection?.visualReviewTimeoutMinutes || 2);
-  const response = await sendAndRead(page, referenceAuditPrompt(type, candidates), timeout);
-  if (assistantReportsMissingReferenceImages(response.text)) {
-    throw new Error("ChatGPT 明确表示未收到参考图视觉审核附件");
-  }
   const minimumScore = Math.max(0, Math.min(100, Number(config?.collection?.visualReviewMinimumScore || 60)));
-  const audit = parseReferenceAudit(response.text, candidates, minimumScore);
+  let response = await currentReferenceAuditResponse(page, candidates, minimumScore);
+  if (!response) {
+    const files = candidates.map((item) => item.file);
+    await attachFiles(page, files);
+    await sendPrompt(page, referenceAuditPrompt(type, candidates));
+    response = await waitForReferenceAuditResponse(page, candidates, minimumScore, timeout);
+  }
+  const audit = response.audit || parseReferenceAudit(response.text, candidates, minimumScore);
   const url = conversationUrl(page.url());
   if (!url) throw new Error("参考图视觉审核完成后未获得有效聊天 URL");
   if (saved?.title !== title || saved?.url !== url) await ensureDirectionChatTitle(page, project, url, title);

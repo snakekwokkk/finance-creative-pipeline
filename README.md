@@ -39,6 +39,7 @@ Finance Creative Pipeline 是一个面向中国互联网金融运营素材的 Co
 - 参考图用于确定主视觉类别、材质气质、颜色关系和信息层级；可保留相近的金融主体（如红包或相近权益材质），同时重设计具体造型细节、文案和局部排布，避免完整照搬。
 - 透明素材优先使用本地背景差分从最终预览中直接抠取。大面积复杂框架包含多个内部图层时，才在同一聊天中让 ChatGPT 去字并补全；报告会明确区分源像素与 GPT 补全素材。视觉上连成一体的复杂主视觉仍作为一个整体。
 - 拆图回复以最新完整且非空的 `DECOMPOSE_START` / `DECOMPOSE_END` 标记 JSON 为完成信号，不依赖单一消息选择器或停止按钮。恢复与重试前先扫描已有聊天，发现完整结果就立即保存，不重复提交。
+- 采集审核回复同样以当前批次 Pin ID 完全匹配的 `REFERENCE_AUDIT_START` / `REFERENCE_AUDIT_END` 标记 JSON 为完成信号，每 0.5 秒扫描整个聊天。上传和重试前会先恢复已有完整结果，不因消息节点或停止按钮误判而重复提交附件。
 - 本地只裁掉透明空白并执行 Alpha 与边界质量检查，不会推断前景蒙版。
 - 紧裁或贴边的小素材会保留并记录警告，不再仅因主体占比高而丢弃。空图、无法获得可用 Alpha 或没有可恢复主体的素材仍会被拒绝；单个失败不会阻止后续素材，部分成功方向可以继续。
 - 每个运行日期只使用一个名为 `金融运营素材 YYYY-MM-DD` 的 ChatGPT 项目。候选内容审核聊天 `采集筛选-弹窗/Banner/浮窗` 和正式方向聊天都保存在该日期项目内；每个设计方向仍只使用一个聊天完成直接生图和拆图。
@@ -288,6 +289,7 @@ A normal run collects 10 references and generates 10 original directions: six po
 - References provide the visual category, material feel, color relationship, and information hierarchy. Generated work may retain a similar financial subject while redesigning concrete shape details, copy, and local layout instead of copying the full design.
 - Transparent assets use local source-pixel matting first. Large composite frames that enclose editable overlays may use a provenance-marked ChatGPT reconstruction fallback in the same chat. Visually connected hero objects stay grouped as one asset.
 - Semantic decomposition completes as soon as the newest non-empty `DECOMPOSE_START` / `DECOMPOSE_END` JSON block is available. It does not depend on one assistant-message selector or the stop control disappearing, and resume/retry paths consume an existing complete response before submitting again.
+- Reference content review likewise completes from the newest `REFERENCE_AUDIT_START` / `REFERENCE_AUDIT_END` JSON block whose Pin IDs exactly match the current batch. The runtime scans the whole chat every 0.5 seconds and recovers a complete result before upload or retry instead of depending on message-node counts or the stop control.
 - Local processing only trims transparent margins and validates Alpha and image boundaries.
 - Tight or boundary-touching small assets are retained with warnings. Empty assets and assets without recoverable Alpha remain rejected; one failure no longer blocks later assets, and partially usable directions may continue.
 - Each run date uses one ChatGPT project named `金融运营素材 YYYY-MM-DD`. The `采集筛选-弹窗/Banner/浮窗` content-audit chats and every direction-generation chat stay inside that dated project. Each design direction still uses exactly one chat for direct generation and decomposition.
