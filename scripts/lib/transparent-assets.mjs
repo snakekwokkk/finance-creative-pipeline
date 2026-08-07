@@ -4,6 +4,13 @@ import path from "node:path";
 import sharp from "sharp";
 
 export const TRANSPARENT_ASSET_ENGINE = "native-source-pixel-matting";
+export const RECONSTRUCTED_ASSET_ENGINE = "chatgpt-reconstructed-matting";
+export const HYBRID_ASSET_ENGINE = "hybrid-source-and-chatgpt-matting";
+
+const supportedAssetEngines = new Set([
+  TRANSPARENT_ASSET_ENGINE,
+  RECONSTRUCTED_ASSET_ENGINE
+]);
 
 export function isRasterAsset(layer) {
   return layer?.editable === "raster"
@@ -98,10 +105,12 @@ async function alphaMetrics(input) {
 }
 
 function assetAccepted(metrics, limits) {
-  return metrics.hasAlpha
+  const essential = metrics.hasAlpha
     && metrics.foregroundRatio >= limits.minForegroundRatio
-    && metrics.foregroundRatio <= limits.maxForegroundRatio
-    && metrics.transparentRatio >= limits.minTransparentRatio
+    && metrics.transparentRatio >= limits.minTransparentRatio;
+  if (!essential) return false;
+  if (limits.allowTightCrop) return true;
+  return metrics.foregroundRatio <= limits.maxForegroundRatio
     && metrics.borderForegroundRatio <= limits.maxBorderForegroundRatio;
 }
 
@@ -136,7 +145,8 @@ export async function validateSeparateAsset({ candidateFile, layer, outputDir, t
     minForegroundRatio: thresholds.minForegroundRatio ?? 0.005,
     maxForegroundRatio: thresholds.maxForegroundRatio ?? 0.82,
     minTransparentRatio: thresholds.minTransparentRatio ?? 0.18,
-    maxBorderForegroundRatio: thresholds.maxBorderForegroundRatio ?? 0.02
+    maxBorderForegroundRatio: thresholds.maxBorderForegroundRatio ?? 0.02,
+    allowTightCrop: thresholds.allowTightCrop ?? true
   };
   const metrics = await alphaMetrics(candidateFile);
   if (!assetAccepted(metrics, limits)) {
@@ -147,6 +157,13 @@ export async function validateSeparateAsset({ candidateFile, layer, outputDir, t
       thresholds: limits,
       reason: rejectionReason(metrics, limits)
     };
+  }
+  const warnings = [];
+  if (metrics.foregroundRatio > limits.maxForegroundRatio) {
+    warnings.push(`主体占比 ${Math.round(metrics.foregroundRatio * 1000) / 10}% 高于建议值 ${Math.round(limits.maxForegroundRatio * 100)}%，已按紧裁小素材保留`);
+  }
+  if (metrics.borderForegroundRatio > limits.maxBorderForegroundRatio) {
+    warnings.push(`边界前景占比 ${Math.round(metrics.borderForegroundRatio * 1000) / 10}% 高于建议值 ${Math.round(limits.maxBorderForegroundRatio * 100)}%，已按紧裁小素材保留`);
   }
   await fs.mkdir(outputDir, { recursive: true });
   const outputFile = separateAssetFile(outputDir, layer);
@@ -159,6 +176,8 @@ export async function validateSeparateAsset({ candidateFile, layer, outputDir, t
   return {
     status: "accepted",
     engine: TRANSPARENT_ASSET_ENGINE,
+    quality: warnings.length ? "tight-crop" : "clean",
+    warnings,
     metrics,
     thresholds: limits,
     file: path.resolve(outputFile),
@@ -266,6 +285,37 @@ export async function extractSourcePixelAsset({ sourceImage, layer, outputDir, t
   };
 }
 
+export async function extractReconstructedAsset({ candidateFile, layer, outputDir, thresholds = {} }) {
+  const metadata = await sharp(candidateFile).metadata();
+  if (!metadata.width || !metadata.height) throw new Error("无法读取 ChatGPT 补全素材尺寸");
+  await fs.mkdir(outputDir, { recursive: true });
+  const matteFile = path.join(outputDir, `.candidate-reconstructed-matte-${layer.assetIndex + 1}.png`);
+  await fs.rm(matteFile, { force: true });
+  await sourcePixelMatte(candidateFile, matteFile, {
+    left: 0,
+    top: 0,
+    width: metadata.width,
+    height: metadata.height
+  }, thresholds);
+  const result = await validateSeparateAsset({
+    candidateFile: matteFile,
+    layer,
+    outputDir,
+    thresholds: {
+      ...thresholds,
+      allowTightCrop: true,
+      maxBorderForegroundRatio: thresholds.reconstructedMaxBorderForegroundRatio ?? 0.75
+    }
+  });
+  await fs.rm(matteFile, { force: true });
+  return {
+    ...result,
+    engine: RECONSTRUCTED_ASSET_ENGINE,
+    sourcePixelExact: false,
+    reconstructedByChatGpt: result.status === "accepted"
+  };
+}
+
 export async function duplicateTransparentAsset(file, acceptedResults = []) {
   if (!file || !Array.isArray(acceptedResults) || !acceptedResults.length) return false;
   let current;
@@ -284,17 +334,18 @@ export async function duplicateTransparentAsset(file, acceptedResults = []) {
   return false;
 }
 
-export async function recoverAcceptedAsset({ layer, outputDir, thresholds = {} }) {
-  const file = separateAssetFile(outputDir, layer);
+export async function recoverAcceptedAsset({ layer, outputDir, thresholds = {}, previousAsset = null }) {
+  const file = previousAsset?.file || separateAssetFile(outputDir, layer);
   try {
     if ((await fs.stat(file)).size < 100) return null;
     const metadata = await sharp(file).metadata();
     if (!metadata.hasAlpha || !metadata.width || !metadata.height) return null;
     return {
+      ...previousAsset,
       status: "accepted",
-      engine: TRANSPARENT_ASSET_ENGINE,
+      engine: supportedAssetEngines.has(previousAsset?.engine) ? previousAsset.engine : TRANSPARENT_ASSET_ENGINE,
       recovered: true,
-      sourcePixelExact: true,
+      sourcePixelExact: previousAsset?.engine === RECONSTRUCTED_ASSET_ENGINE ? false : true,
       file: path.resolve(file),
       intrinsicPx: { width: metadata.width, height: metadata.height }
     };
@@ -329,6 +380,10 @@ export async function writeDecompositionReport({ plan, sourceImage, outputDir, a
       warnings.push(`${layer.id}: ${record.asset.reason}`);
       return record;
     }
+    for (const warning of record.asset.warnings || []) warnings.push(`${layer.id}: ${warning}`);
+    if (record.asset.suppressesLayerIds?.length) {
+      warnings.push(`${layer.id}: 保留的紧裁源像素已包含 ${record.asset.suppressesLayerIds.join("、")}，Figma 重构时跳过这些重复图层`);
+    }
     record.file = record.asset.file;
     record.assetIntrinsicPx = record.asset.intrinsicPx;
     record.assetPlacement = {
@@ -337,23 +392,46 @@ export async function writeDecompositionReport({ plan, sourceImage, outputDir, a
       align: "center",
       preserveAspectRatio: true
     };
-    record.extractionMode = "native-source-pixel-asset";
+    record.extractionMode = record.asset.engine === RECONSTRUCTED_ASSET_ENGINE
+      ? "chatgpt-reconstructed-asset"
+      : "native-source-pixel-asset";
     return record;
   });
   const rejectedCount = layers.filter((layer) => layer.extractionMode === "transparent-asset-rejected").length;
+  const rasterCount = layers.filter(isRasterAsset).length;
+  const acceptedRasterCount = rasterCount - rejectedCount;
+  const engines = [...new Set(layers
+    .filter((layer) => layer.asset?.status === "accepted")
+    .map((layer) => layer.asset.engine)
+    .filter(Boolean))];
+  const reportEngine = engines.length > 1 ? HYBRID_ASSET_ENGINE : engines[0] || TRANSPARENT_ASSET_ENGINE;
+  const status = rejectedCount === 0
+    ? "ready"
+    : acceptedRasterCount > 0
+      ? "partial"
+      : "rejected";
   const report = {
     schemaVersion: 4,
-    status: rejectedCount ? "rejected" : "ready",
+    status,
     sourceImage: path.resolve(sourceImage),
     canvas: { width: canvasWidth, height: canvasHeight },
-    transparentAssets: plan.transparentAssets,
+    transparentAssets: {
+      ...plan.transparentAssets,
+      engine: reportEngine,
+      acceptedCount: acceptedRasterCount,
+      rejectedCount
+    },
     layers,
-    editableReadiness: rejectedCount ? "transparent-assets-rejected" : "native-source-assets-ready",
+    editableReadiness: status === "ready"
+      ? "assets-ready"
+      : status === "partial"
+        ? "partial-assets-ready"
+        : "transparent-assets-rejected",
     warnings,
     limitations: [
-      "透明素材通过 macOS 原生前景分割直接保留完整预览中的源像素，不允许模型重绘",
+      "优先通过本地背景分离保留完整预览中的源像素；无法去字或补全遮挡时可由同一 ChatGPT 对话重建，并在 asset.engine 中明确标记",
       "只有无法用 Figma 基础图形可靠重建的复杂视觉才应生成透明 PNG",
-      "同一主视觉中的立体对象应作为一个整体提取，避免拆成多个相互漂移的零件"
+      "紧裁或贴边的小素材允许保留并记录警告；部分素材失败不再丢弃同方向的其他可用素材"
     ]
   };
   await fs.writeFile(path.join(outputDir, "decomposition-report.json"), `${JSON.stringify(report, null, 2)}\n`, "utf8");
@@ -361,11 +439,12 @@ export async function writeDecompositionReport({ plan, sourceImage, outputDir, a
 }
 
 export async function reportAssetsReady(report) {
-  if (report?.schemaVersion < 4 || report?.status !== "ready") return false;
-  if (report?.transparentAssets?.engine !== TRANSPARENT_ASSET_ENGINE) return false;
-  const files = (report.layers || [])
-    .filter((layer) => layer.extractionMode === "native-source-pixel-asset")
-    .map((layer) => layer.file);
+  if (report?.schemaVersion < 4 || !["ready", "partial"].includes(report?.status)) return false;
+  const accepted = (report.layers || [])
+    .filter((layer) => ["native-source-pixel-asset", "chatgpt-reconstructed-asset"].includes(layer.extractionMode));
+  if (report.status === "partial" && !accepted.length) return false;
+  if (accepted.some((layer) => !supportedAssetEngines.has(layer.asset?.engine))) return false;
+  const files = accepted.map((layer) => layer.file);
   try {
     await Promise.all(files.map(async (file) => {
       if (!file || (await fs.stat(file)).size < 100) throw new Error("missing asset");

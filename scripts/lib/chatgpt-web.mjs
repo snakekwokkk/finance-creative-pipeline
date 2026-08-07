@@ -5,6 +5,7 @@ import { readJson, writeJsonAtomic } from "./state.mjs";
 import { screenshotFailure } from "./browser.mjs";
 import {
   assignAssetIndices,
+  extractReconstructedAsset,
   extractSourcePixelAsset,
   isRasterAsset,
   recoverAcceptedAsset,
@@ -20,17 +21,40 @@ function remainingAttemptTimeout(startedAt, limit) {
   return Math.max(1_000, limit - (Date.now() - startedAt));
 }
 
-function extractJson(text) {
-  const marked = text.match(/FINANCE_SPEC_START\s*([\s\S]*?)\s*FINANCE_SPEC_END/);
-  const candidate = marked?.[1] || text.match(/```json\s*([\s\S]*?)```/i)?.[1];
-  if (!candidate) throw new Error("ChatGPT 回复中未找到结构化 JSON");
-  return JSON.parse(candidate.trim());
-}
-
 function extractMarkedJson(text, start, end) {
   const candidate = text.match(new RegExp(`${start}\\s*([\\s\\S]*?)\\s*${end}`))?.[1] || text.match(/```json\\s*([\\s\\S]*?)```/i)?.[1];
   if (!candidate) throw new Error(`ChatGPT 回复中未找到 ${start} JSON`);
   return JSON.parse(candidate.trim());
+}
+
+export function decompositionJsonResponses(text) {
+  const responses = [];
+  const pattern = /DECOMPOSE_START\s*([\s\S]*?)\s*DECOMPOSE_END/g;
+  for (const match of String(text || "").matchAll(pattern)) {
+    try {
+      const payload = JSON.parse(match[1].trim());
+      if (Number(payload?.schemaVersion || 0) < 4 || !Array.isArray(payload?.layers) || !payload.layers.length) continue;
+      responses.push({
+        text: match[0],
+        payload,
+        key: JSON.stringify(payload)
+      });
+    } catch {}
+  }
+  return responses;
+}
+
+export function latestNewDecompositionResponse(texts, knownKeys = new Set()) {
+  const seen = new Set();
+  const responses = [];
+  for (const text of texts || []) {
+    for (const response of decompositionJsonResponses(text)) {
+      if (seen.has(response.key)) continue;
+      seen.add(response.key);
+      responses.push(response);
+    }
+  }
+  return responses.reverse().find((response) => !knownKeys.has(response.key)) || null;
 }
 
 async function composer(page) {
@@ -383,14 +407,14 @@ export function assistantReportsMissingReferenceImages(text) {
     .test(String(text || ""));
 }
 
-export function referenceAnalysisReceiptValid(receipt, files) {
-  if (!receipt?.analysisAcceptedAt || !Array.isArray(receipt.files)) return false;
+export function generationReferenceReceiptValid(receipt, files) {
+  if (!(receipt?.generationSubmittedAt || receipt?.analysisAcceptedAt) || !Array.isArray(receipt.files)) return false;
   const delivered = new Set(receipt.files);
   return files.map((file) => path.basename(file)).every((name) => delivered.has(name));
 }
 
-export function referenceUploadRequired(cachedSpec, referencesAttached) {
-  return !cachedSpec && !referencesAttached;
+export function generationReferenceUploadRequired(receipt, files, hasSavedChat) {
+  return !(hasSavedChat && generationReferenceReceiptValid(receipt, files));
 }
 
 async function composerForm(page) {
@@ -580,6 +604,34 @@ async function waitForAssistantText(page, previousCount, timeout) {
   throw error;
 }
 
+async function decompositionTextSnapshots(page) {
+  const snapshots = [];
+  const selectors = [
+    '[data-message-author-role="assistant"]',
+    'main [data-testid^="conversation-turn-"]',
+    "main article"
+  ];
+  for (const selector of selectors) {
+    const texts = await page.locator(selector).allInnerTexts().catch(() => []);
+    snapshots.push(...texts);
+  }
+  snapshots.push(await page.locator("body").innerText().catch(() => ""));
+  return snapshots;
+}
+
+async function waitForDecompositionResponse(page, knownKeys, timeout) {
+  const started = Date.now();
+  while (Date.now() - started < timeout) {
+    if (page.isClosed()) throw new Error("ChatGPT 页面已关闭，无法继续等待语义分层结果");
+    const response = latestNewDecompositionResponse(await decompositionTextSnapshots(page), knownKeys);
+    if (response) return response;
+    await page.waitForTimeout(500);
+  }
+  const error = new Error(`等待 ChatGPT 语义分层标记超时（${Math.round(timeout / 1000)} 秒）`);
+  error.code = "CHATGPT_DECOMPOSITION_TIMEOUT";
+  throw error;
+}
+
 async function sendAndRead(page, prompt, timeout) {
   const messages = page.locator('[data-message-author-role="assistant"]');
   const before = await messages.count();
@@ -755,10 +807,20 @@ async function acceptDownloadedImage(page, file, src, previous, excludedFiles, t
   return true;
 }
 
-async function saveLastAssistantImage(page, file, timeout, previousSources = [], excludedFiles = []) {
+async function saveLastAssistantImage(page, file, timeout, previousSources = [], excludedFiles = [], assistantBaseline = 0) {
   const started = Date.now();
   const previous = new Set(previousSources);
   while (Date.now() - started < timeout) {
+    const assistantMessages = page.locator('[data-message-author-role="assistant"]');
+    const assistantCount = await assistantMessages.count().catch(() => assistantBaseline);
+    for (let index = assistantCount - 1; index >= assistantBaseline; index -= 1) {
+      const text = await assistantMessages.nth(index).innerText().catch(() => "");
+      if (assistantReportsMissingReferenceImages(text)) {
+        const error = new Error("ChatGPT 明确表示未收到参考图，下一次尝试将重新上传");
+        error.code = "REFERENCE_ATTACHMENT_MISSING";
+        throw error;
+      }
+    }
     const pageText = await page.locator("body").innerText().catch(() => "");
     if (/图片生成失败|无法完成这张图|image generation failed|unable to (complete|generate) (this|the) image/i.test(pageText)) {
       throw new Error("ChatGPT 网页报告图片生成失败");
@@ -823,29 +885,14 @@ async function saveLastAssistantImage(page, file, timeout, previousSources = [],
   throw new Error("等待 ChatGPT 生成图片超时");
 }
 
-export function analysisPrompt(index, type) {
-  const popupRule = type === "popup"
-    ? "\n\n这是弹窗方向，只分析和设计弹窗本体：弹窗卡片、卡内内容、贴附或越出卡片的主视觉、阴影、按钮及属于弹窗的装饰。不要把参考图中的 App 页面、搜索栏、导航、侧边卡片、行情面板、底部 Tab 或其他环境背景写入 composition、components 或 imagePrompt。"
-    : "";
-  const floatRule = type === "float"
-    ? "\n\n这是浮窗/单元素方向。参考图可以是完整浮窗，也可以只是一个金融相关的 3D 素材、插图、红包、金币、徽章、权益图形或‘元素+按钮’组合。不要强行补成完整页面或大卡片；优先保留参考图的主体轮廓、材质和信息层级。"
-    : "";
-  const components = type === "popup"
-    ? '["Popup Card", "Attached Hero", "Decorations", "Icon", "Title", "Subtitle", "CTA"]'
-    : type === "float"
-      ? '["Standalone Financial Element", "Optional CTA", "Icon", "Title", "Subtitle", "Decorations"]'
-      : '["Background", "Decorations", "Icon", "Title", "Subtitle", "CTA"]';
-  return `你是一名中国互联网金融运营视觉设计师。请直接分析我上传的一张参考图，为第${index}套方向输出品牌中性的原创设计规格。${popupRule}${floatRule}\n\n参考图用于确定主视觉类别、轮廓方向、材质气质、色彩关系和信息层级。保留与参考图相近的金融视觉语义，例如红包可继续使用红包或相近的金融权益材质；同时重新设计具体造型细节、文案和局部排布，避免完整照搬。文案必须使用新的活动场景和利益点，不得出现真实Logo、品牌名、二维码、手机号、必下款、百分百审批、固定收益或伪造监管背书。\n\n不要套用固定模板，也不要把所有方向写成相同的蓝色渐变卡片。现代风格硬约束：使用实色或克制渐变、哑光/细腻材质和清晰边界；禁止冰透玻璃、过度透明、泛光、镜头光晕、随机粒子、无意义星芒、过多金币、环形光轨和油腻的 3D 图标；装饰最多 3 组。\n\n同时输出 referenceStructure、transformationPlan 和 assetInventory：referenceStructure 记录可延续的主体、版式关系和视觉重心；transformationPlan 说明保留的视觉类别及重新设计的细节；assetInventory 将视觉上连成一体的复杂主视觉归为一个对象，给出 id、role、bbox、nativeFidelity（用 Figma 基础图形和文字重建的预计完成度）以及 mustRaster（nativeFidelity < 0.8 时必须为 true）。\n\n只输出以下标记包裹的合法JSON，不要增加解释：\nFINANCE_SPEC_START\n{\n  "keywords": ["参考图启发的原创视觉关键词"],\n  "composition": "延续主体类别并重新设计后的构图与比例描述",\n  "referenceStructure": {"subject": "可延续的主体类型", "regions": [{"name": "区域", "relativeBox": [0,0,1,1], "purpose": "作用"}], "focus": "视觉重心"},\n  "transformationPlan": [{"axis":"hero|copy|detail|layout","change":"保留类别后的重新设计说明"}],\n  "assetInventory": [{"id": "asset_id", "role": "完整复杂主视觉组", "bbox": [0,0,1,1], "nativeFidelity": 0.5, "mustRaster": true, "containsText": false}],\n  "palette": ["#RRGGBB"],\n  "components": ${components},\n  "typography": "字体气质",\n  "copy": {"title": "全新活动场景标题", "subtitle": "全新利益点副标题", "cta": "全新按钮文案"},\n  "imagePrompt": "保留主视觉类别与材质气质、重新设计细节和文案的生成提示词"\n}\nFINANCE_SPEC_END`;
-}
-
-export function previewPrompt(spec, width, height, type, index = "") {
+export function directGenerationPrompt(index, type, width, height) {
   const popupRule = type === "popup"
     ? "\n\n这是一张弹窗素材，不是完整 App 页面。只生成一个完整弹窗本体，包括弹窗卡片、阴影、贴附或越出卡片的主视觉、卡内文字、图标、数据面板和按钮。弹窗外部只留均匀、干净的纯色空白安全区，不生成或暗示 App 页面、搜索栏、导航栏、底部 Tab、页面卡片、信息流、页面图表或其他界面背景，也不要用虚化页面填充弹窗后方。让弹窗主体尽量占满画布并保持完整，不要裁切。"
     : "";
   const floatRule = type === "float"
     ? "\n\n这是浮窗/单元素素材。只生成参考图对应的独立金融主体，允许是单个 3D 素材、插图、红包、金币、徽章或‘主体+按钮’，不要补成完整 App 页面、长海报或大信息卡。主体周围留干净安全区，确保后续可以独立提取。"
     : "";
-  return `请根据第${index}套参考图和下面的规格生成一张品牌中性的中国互联网金融运营素材，画布比例约为 ${width}:${height}。保留与参考图相近的主视觉类别、材质气质、色彩关系和信息层级；例如参考图以红包为主视觉时，可继续使用红包或相近的金融权益材质。重新设计具体造型细节、文案和局部排布，避免完整照搬。文案使用新的活动场景和利益点；不要套用固定模板，也不要把不同方向生成成同一张图。不出现真实Logo、品牌名、二维码或手机号。${popupRule}${floatRule}\n\n现代风格硬约束：实色或克制渐变、哑光或细腻材质、清晰边界、少量阴影；禁止冰透玻璃、过度透明、泛光、镜头光晕、随机粒子、无意义星芒、环形光轨、堆叠金币和油腻 3D 图标。装饰最多 3 组。\n\n${JSON.stringify(spec, null, 2)}`;
+  return `你是一名中国互联网金融运营视觉设计师。请先在内部理解我上传的第${index}套参考图，再直接生成且只生成一张品牌中性的原创运营素材，画布比例约为 ${width}:${height}。不要输出分析过程、设计规格、提示词、JSON 或文字说明；直接调用图片生成。${popupRule}${floatRule}\n\n参考图只用于确定主视觉类别、轮廓方向、材质气质、色彩关系和信息层级。保留相近的金融视觉语义，例如红包可继续使用红包或相近的金融权益材质；重新设计具体造型细节、文案和局部排布，避免完整照搬。文案使用新的活动场景和利益点，不要套用固定模板，也不要把不同方向生成成同一张图。不得出现真实 Logo、品牌名、二维码、手机号、必下款、百分百审批、固定收益或伪造监管背书。\n\n现代风格硬约束：使用实色或克制渐变、哑光或细腻材质、清晰边界和少量阴影；禁止冰透玻璃、过度透明、泛光、镜头光晕、随机粒子、无意义星芒、环形光轨、堆叠金币和油腻 3D 图标；装饰最多 3 组。`;
 }
 
 export function decompositionPrompt(index, width, height, maxAssets, type) {
@@ -856,6 +903,54 @@ export function decompositionPrompt(index, width, height, maxAssets, type) {
     ? "\n\n这是浮窗/单元素方向。只输出参考图中的独立金融主体及可选按钮，不要补出完整页面、长海报或环境背景；一个 3D 素材、插图、红包、金币、徽章或‘元素+按钮’也可以作为完整方向。"
     : "";
   return `直接分析当前对话中刚生成的第${index}套完整运营预览图（${width}x${height}），无需上传或重新上传该图，输出供 Figma 重构的图层 JSON。逐层输出背景、卡片、按钮、文字、图标、装饰和主视觉。视觉上连成一体、共同构成一个主视觉的复杂对象必须合并为一个 raster 组，例如“盾牌+箭头+基座+附属金币”或“红包+挂件+贴附飘带”；不要把同一主视觉拆成多个会错位的零件。只有空间上彼此独立、可单独移动的复杂视觉才分成不同 raster。每个 raster 的 bbox 必须紧贴完整主体并留约 3% 安全边距，且不得包含文字。每层提供0到1的bbox、zIndex、confidence，并增加 nativeFidelity（用 Figma 基础图形和文字重建的预计完成度）。${popupRule}${floatRule}\n\neditable只能是background、raster、vector或text。nativeFidelity < 0.8，或对象包含复杂 3D 材质、渐变折面、立体徽章、复杂插图、独特主视觉时，editable 必须为 raster；nativeFidelity >= 0.8 且确实是简单几何、普通功能图标、文字或纯色按钮时才用 vector/text。最多 ${maxAssets} 个 raster，每个复杂主视觉组必须有唯一 id 和 assetPrompt。每个普通功能图标使用kind=icon，并增加icon对象：query用2到4个简短英文词准确描述图标语义，style只可为line或fill，color使用原图十六进制颜色。\n\n只输出以下标记包裹的合法JSON，不要解释。严格只用三行：第一行DECOMPOSE_START，第二行是完整的单行紧凑JSON，第三行DECOMPOSE_END。JSON内部不得换行或缩进，不要使用Markdown代码块。\nDECOMPOSE_START\n{"schemaVersion":4,"canvas":{"width":${width},"height":${height}},"layers":[]}\nDECOMPOSE_END\n\n必须把识别出的完整 layers 数组填入 JSON；不要改写文字，不要猜看不清的内容，不要输出蒙版或多边形。`;
+}
+
+function normalizedLayerBox(layer) {
+  const box = layer?.bbox;
+  if (!box) return null;
+  if (Array.isArray(box)) {
+    if (box.length < 4) return null;
+    const [x, y, third, fourth] = box.map(Number);
+    return third > x && fourth > y
+      ? { x, y, width: third - x, height: fourth - y }
+      : { x, y, width: third, height: fourth };
+  }
+  return { x: Number(box.x), y: Number(box.y), width: Number(box.width), height: Number(box.height) };
+}
+
+export function embeddedLayerIds(layers, rasterLayer) {
+  const outer = normalizedLayerBox(rasterLayer);
+  if (!outer || ![outer.x, outer.y, outer.width, outer.height].every(Number.isFinite)) return [];
+  const right = outer.x + outer.width;
+  const bottom = outer.y + outer.height;
+  return (layers || [])
+    .filter((layer) => layer?.id && layer.id !== rasterLayer.id && Number(layer.zIndex || 0) > Number(rasterLayer.zIndex || 0))
+    .filter((layer) => {
+      const inner = normalizedLayerBox(layer);
+      if (!inner || ![inner.x, inner.y, inner.width, inner.height].every(Number.isFinite)) return false;
+      const centerX = inner.x + inner.width / 2;
+      const centerY = inner.y + inner.height / 2;
+      return centerX >= outer.x && centerX <= right && centerY >= outer.y && centerY <= bottom;
+    })
+    .map((layer) => layer.id);
+}
+
+export function rasterNeedsReconstruction(layer, layers, config = {}) {
+  const box = normalizedLayerBox(layer);
+  if (!box) return false;
+  const embedded = embeddedLayerIds(layers, layer);
+  const area = box.width * box.height;
+  const minimumArea = Number(config.reconstructionAreaThreshold ?? 0.22);
+  const minimumEmbedded = Number(config.reconstructionEmbeddedLayerCount ?? 2);
+  return area >= minimumArea && embedded.length >= minimumEmbedded;
+}
+
+export function reconstructedAssetPrompt(layer, embeddedLayers = []) {
+  const subject = layer.assetPrompt || layer.role || layer.id;
+  const removals = embeddedLayers.length
+    ? `需要移除并补全其遮挡区域的内容包括：${embeddedLayers.map((item) => item.text || item.id).join("、")}。`
+    : "移除主体上的所有文字、数字、按钮、信息卡和其他覆盖内容，并补全被遮挡的原有材质。";
+  return `基于当前对话中刚生成的完整预览图，重新生成一个可独立使用的“${subject}”素材。只保留这个复杂主体的完整框架、造型、材质、颜色、厚度、光影和自带阴影；${removals}根据主体周围可见的结构和材质自然补全缺失部分，不要改变外轮廓和整体比例。不要包含任何文字、数字、按钮、信息卡、徽章或其他独立元素。使用均匀纯白背景，主体四周至少保留 12% 空白，不要棋盘格、场景背景或说明文字。直接生成且只生成一张图片。`;
 }
 
 export function selectDirectionReference(references, type, typeIndex) {
@@ -913,19 +1008,6 @@ export function directionAttemptLimit(config, historicalFailure = false) {
   const generation = config?.generation || {};
   const configured = Number(generation.maxAttempts ?? (Number(generation.maxRetries ?? 1) + 1));
   return Math.max(1, Number.isFinite(configured) ? Math.floor(configured) : 2);
-}
-
-export function analysisAttemptLimit(config, finalRetry = false) {
-  if (finalRetry) return 1;
-  const configured = Number(config?.generation?.analysisMaxAttempts ?? 2);
-  return Math.max(1, Number.isFinite(configured) ? Math.floor(configured) : 2);
-}
-
-export function enqueueAnalysisFinalRetry(queue, index, { stage, finalRetry }) {
-  if (stage !== "analysis" || finalRetry) return false;
-  if (queue.some((item) => item.index === index && item.analysisFinalRetry)) return false;
-  queue.push({ index, historicalFailure: false, analysisFinalRetry: true });
-  return true;
 }
 
 export function requiresUserAction(error) {
@@ -1046,95 +1128,186 @@ export async function decomposePreview(
   const cached = force ? null : await readJson(layersFile);
   const cachedReport = force ? null : await readJson(reportFile);
   if (cached?.schemaVersion >= 4 && cached?.layers?.length && await reportAssetsReady(cachedReport)) return cached;
-  const decompositionTimeout = config.generation.decompositionTimeoutMinutes || config.generation.analysisTimeoutMinutes;
+  const decompositionTimeout = config.generation.decompositionTimeoutMinutes || config.generation.imageTimeoutMinutes;
   const assetConfig = config.transparentAssets || {};
   const maxAssets = assetConfig.maxAssets ?? 8;
   const attempts = limits.decompositionAttempts ?? decompositionAttemptLimit(config);
   const timeout = minuteTimeout(decompositionTimeout);
+  const assetTimeout = minuteTimeout(assetConfig.timeoutMinutes ?? 5);
   const assetAttempts = limits.transparentAssetAttempts ?? transparentAssetAttemptLimit(config);
   let layers = cached?.schemaVersion >= 4 && cached?.layers?.length ? cached : null;
-  let responseBaseline = null;
+  let knownDecompositionKeys = null;
   const assetResults = new Map();
 
   if (!layers) {
-    layers = await runDecompositionAttempts({
-      attempts,
-      recover: async ({ attempt, lastError }) => recoverConversation({ attempt, lastError }),
-      operation: async ({ attempt, lastError }) => {
-        const attemptStartedAt = Date.now();
-        let analysis = null;
-        if (attempt > 1 && responseBaseline !== null && lastError?.code !== "PREVIEW_ATTACHMENT_MISSING") {
-          analysis = await waitForAssistantText(page, responseBaseline, Math.min(10_000, remainingAttemptTimeout(attemptStartedAt, timeout))).catch((error) => {
-            if (error.code === "CHATGPT_RESPONSE_TIMEOUT") return null;
-            throw error;
-          });
-          if (analysis) {
+    const existingSnapshots = await decompositionTextSnapshots(page);
+    const recovered = force ? null : latestNewDecompositionResponse(existingSnapshots, new Set());
+    knownDecompositionKeys = new Set(existingSnapshots.flatMap(decompositionJsonResponses).map((response) => response.key));
+    if (recovered) {
+      await fs.writeFile(path.join(directionDir, "decomposition-analysis.txt"), recovered.text, "utf8");
+      layers = assignAssetIndices(recovered.payload, maxAssets);
+    } else {
+      layers = await runDecompositionAttempts({
+        attempts,
+        recover: async ({ attempt, lastError }) => recoverConversation({ attempt, lastError }),
+        operation: async ({ attempt, lastError }) => {
+          const attemptStartedAt = Date.now();
+          let analysis = null;
+          if (attempt > 1 && lastError?.code !== "PREVIEW_ATTACHMENT_MISSING") {
+            analysis = await waitForDecompositionResponse(
+              page,
+              knownDecompositionKeys,
+              Math.min(10_000, remainingAttemptTimeout(attemptStartedAt, timeout))
+            ).catch((error) => {
+              if (error.code === "CHATGPT_DECOMPOSITION_TIMEOUT") return null;
+              throw error;
+            });
+            if (analysis) await onConversationReady();
+          }
+          if (!analysis) {
+            await sendPrompt(page, decompositionPrompt(index, width, height, maxAssets, type));
+            analysis = await waitForDecompositionResponse(
+              page,
+              knownDecompositionKeys,
+              remainingAttemptTimeout(attemptStartedAt, timeout)
+            );
             await onConversationReady();
-            if (assistantReportsMissingReferenceImages(analysis.text)) {
-              responseBaseline = await page.locator('[data-message-author-role="assistant"]').count();
-              const missing = new Error("ChatGPT 延迟回复表示未收到完整预览图片");
-              missing.code = "PREVIEW_ATTACHMENT_MISSING";
-              throw missing;
-            }
           }
+          const analysisFile = path.join(directionDir, "decomposition-analysis.txt");
+          await fs.writeFile(analysisFile, analysis.text, "utf8");
+          return assignAssetIndices(analysis.payload, maxAssets);
+        },
+        onFailure: async ({ attempt, error }) => {
+          console.error(`第 ${index} 套语义分层第 ${attempt}/${attempts} 次失败：${error.message}`);
+          await screenshotFailure(page, path.join(directionDir, `decomposition-error-attempt-${attempt}.png`));
         }
-        if (!analysis) {
-          const messages = page.locator('[data-message-author-role="assistant"]');
-          if (responseBaseline === null) responseBaseline = await messages.count();
-          await sendPrompt(page, decompositionPrompt(index, width, height, maxAssets, type));
-          analysis = await waitForAssistantText(page, responseBaseline, remainingAttemptTimeout(attemptStartedAt, timeout));
-          await onConversationReady();
-          if (assistantReportsMissingReferenceImages(analysis.text)) {
-            responseBaseline = await page.locator('[data-message-author-role="assistant"]').count();
-            const missing = new Error("ChatGPT 明确表示未收到完整预览图片");
-            missing.code = "PREVIEW_ATTACHMENT_MISSING";
-            throw missing;
-          }
-        }
-        const analysisFile = path.join(directionDir, "decomposition-analysis.txt");
-        await fs.writeFile(analysisFile, analysis.text, "utf8");
-        return assignAssetIndices(extractMarkedJson(analysis.text, "DECOMPOSE_START", "DECOMPOSE_END"), maxAssets);
-      },
-      onFailure: async ({ attempt, error }) => {
-        console.error(`第 ${index} 套语义分层第 ${attempt}/${attempts} 次失败：${error.message}`);
-        await screenshotFailure(page, path.join(directionDir, `decomposition-error-attempt-${attempt}.png`));
-      }
-    });
+      });
+    }
   } else {
     layers = assignAssetIndices(layers, maxAssets);
   }
   await writeJsonAtomic(layersFile, layers);
   await fs.mkdir(outputDir, { recursive: true });
-  const reusableNativeAssets = cachedReport?.transparentAssets?.engine === "native-source-pixel-matting";
+  const reusableAssets = cachedReport?.schemaVersion >= 4;
+  const previousAssets = new Map((cachedReport?.layers || [])
+    .filter((layer) => layer.asset?.status === "accepted")
+    .map((layer) => [layer.id, layer.asset]));
   const existingFiles = await fs.readdir(outputDir, { withFileTypes: true });
   await Promise.all(existingFiles
     .filter((entry) => entry.isFile() && (
       (entry.name.startsWith(".candidate-") && entry.name.toLowerCase().endsWith(".png"))
-      || ((!reusableNativeAssets || force) && /^\d{2}-.*\.png$/i.test(entry.name))
+      || ((!reusableAssets || force) && /^\d{2}-.*\.png$/i.test(entry.name))
     ))
     .map((entry) => fs.rm(path.join(outputDir, entry.name), { force: true })));
 
-  let assetFailure = null;
+  const reconstructionLimit = Math.max(0, Number(assetConfig.maxReconstructedAssets ?? 2));
+  let reconstructionCount = 0;
   for (const layer of layers.layers.filter(isRasterAsset).sort((left, right) => left.assetIndex - right.assetIndex)) {
-    let result = assetResults.get(layer.id)
-      || (!force && reusableNativeAssets && await recoverAcceptedAsset({ layer, outputDir, thresholds: assetConfig }));
-    if (result?.status === "accepted") {
-      assetResults.set(layer.id, result);
-      continue;
-    }
-    try {
-      result = await extractSourcePixelAsset({ sourceImage: previewFile, layer, outputDir, thresholds: assetConfig });
-      if (result.status !== "accepted") {
-        const rejected = new Error(result.reason);
-        rejected.assetResult = result;
-        throw rejected;
+    const embeddedIds = embeddedLayerIds(layers.layers, layer);
+    const embeddedLayers = layers.layers.filter((item) => embeddedIds.includes(item.id));
+    let sourceResult = assetResults.get(layer.id)
+      || (!force && reusableAssets && await recoverAcceptedAsset({
+        layer,
+        outputDir,
+        thresholds: assetConfig,
+        previousAsset: previousAssets.get(layer.id)
+      }));
+    if (!sourceResult || sourceResult.engine === "chatgpt-reconstructed-matting") {
+      if (sourceResult?.status === "accepted") {
+        assetResults.set(layer.id, sourceResult);
+        continue;
       }
-    } catch (error) {
-      result = error.assetResult || { status: "rejected", reason: error.message };
-      assetFailure = error;
+      sourceResult = await extractSourcePixelAsset({ sourceImage: previewFile, layer, outputDir, thresholds: assetConfig });
+    }
+
+    const requiresReconstruction = rasterNeedsReconstruction(layer, layers.layers, assetConfig);
+    const canReconstruct = reconstructionCount < reconstructionLimit
+      && (sourceResult.status !== "accepted" || requiresReconstruction);
+    let result = sourceResult;
+    if (canReconstruct) {
+      reconstructionCount += 1;
+      let sourceFallbackFile = null;
+      if (sourceResult.status === "accepted" && sourceResult.file) {
+        sourceFallbackFile = path.join(outputDir, `source-${path.basename(sourceResult.file)}`);
+        await fs.copyFile(sourceResult.file, sourceFallbackFile).catch(() => {});
+      }
+      try {
+        result = await runTransparentAssetAttempts({
+          attempts: assetAttempts,
+          layer,
+          recover: async ({ attempt, lastError }) => recoverConversation({ attempt, lastError }),
+          operation: async ({ attempt, lastError }) => {
+            const attemptStartedAt = Date.now();
+            const candidateFile = path.join(outputDir, `.candidate-reconstructed-${layer.assetIndex + 1}.png`);
+            await fs.rm(candidateFile, { force: true });
+            const previousSources = await visibleImageSources(page);
+            const assistantBaseline = await page.locator('[data-message-author-role="assistant"]').count();
+            const prompt = attempt === 1
+              ? reconstructedAssetPrompt(layer, embeddedLayers)
+              : `${reconstructedAssetPrompt(layer, embeddedLayers)}\n\n上一次结果未通过：${lastError?.assetResult?.reason || lastError?.message || "素材不完整"}。请扩大留白并确保只保留目标主体。`;
+            await sendPrompt(page, prompt);
+            await saveLastAssistantImage(
+              page,
+              candidateFile,
+              remainingAttemptTimeout(attemptStartedAt, assetTimeout),
+              previousSources,
+              [previewFile],
+              assistantBaseline
+            );
+            await onConversationReady();
+            const candidateResult = await extractReconstructedAsset({
+              candidateFile,
+              layer,
+              outputDir,
+              thresholds: assetConfig
+            });
+            if (candidateResult.status === "accepted") {
+              await fs.rm(candidateFile, { force: true });
+              return {
+                ...candidateResult,
+                sourceFallbackFile,
+                reconstructionReason: sourceResult.status === "accepted"
+                  ? "源像素素材包含内部可编辑图层，需要去字并补全遮挡"
+                  : sourceResult.reason
+              };
+            }
+            const rejectedFile = path.join(outputDir, `rejected-reconstructed-${String(layer.assetIndex + 1).padStart(2, "0")}-attempt-${attempt}.png`);
+            await fs.rename(candidateFile, rejectedFile).catch(() => {});
+            const rejected = new Error(candidateResult.reason);
+            rejected.assetResult = { ...candidateResult, rejectedFile };
+            throw rejected;
+          },
+          onFailure: async ({ attempt, error }) => {
+            console.error(`第 ${index} 套 GPT 补全素材 ${layer.id} 第 ${attempt}/${assetAttempts} 次失败：${error.message}`);
+            await screenshotFailure(page, path.join(directionDir, `asset-${String(layer.assetIndex + 1).padStart(2, "0")}-error-attempt-${attempt}.png`));
+          }
+        });
+      } catch (error) {
+        if (sourceResult.status === "accepted") {
+          result = {
+            ...sourceResult,
+            sourceFallbackFile,
+            suppressesLayerIds: embeddedIds,
+            warnings: [
+              ...(sourceResult.warnings || []),
+              `GPT 去字补全未完成，保留源像素整体：${error.message}`
+            ]
+          };
+        } else {
+          result = error.assetResult || { status: "rejected", reason: error.message };
+        }
+      }
+    } else if (sourceResult.status === "accepted" && embeddedIds.length) {
+      result = {
+        ...sourceResult,
+        suppressesLayerIds: embeddedIds,
+        warnings: [
+          ...(sourceResult.warnings || []),
+          "紧裁素材保留了内部内容，Figma 重构时跳过重复图层"
+        ]
+      };
     }
     assetResults.set(layer.id, result);
-    if (assetFailure) break;
   }
   const report = await writeDecompositionReport({
     plan: layers,
@@ -1142,9 +1315,8 @@ export async function decomposePreview(
     outputDir,
     assetResults
   });
-  if (assetFailure) throw assetFailure;
-  if (report.status !== "ready") {
-    const error = new Error(`ChatGPT 独立透明素材未通过质量检查：${report.warnings.join("；") || "存在无效素材"}`);
+  if (report.status === "rejected") {
+    const error = new Error(`没有任何复杂透明素材可用：${report.warnings.join("；") || "全部素材均未通过"}`);
     error.stage = "transparent_assets";
     error.attempts = assetAttempts;
     throw error;
@@ -1195,7 +1367,7 @@ export async function generateDirections({
     console.warn(`以下已完成方向引用了不合格参考图，将仅重做这些方向：${[...invalidatedDirections].join("、")}`);
   }
   const historicalFailures = new Set(activeDirectionFailures(manifest)
-    .filter((item) => item.stage !== "collection")
+    .filter((item) => item.stage !== "collection" && item.stage !== "analysis")
     .map((item) => item.index));
   let project = initialProject;
   if (manifest.chatgptProject?.url) {
@@ -1218,11 +1390,10 @@ export async function generateDirections({
 
   const processingQueue = directionProcessingOrder(count, manifest).map((index) => ({
     index,
-    historicalFailure: historicalFailures.has(index),
-    analysisFinalRetry: false
+    historicalFailure: historicalFailures.has(index)
   }));
   for (let queuePosition = 0; queuePosition < processingQueue.length; queuePosition += 1) {
-    const { index, historicalFailure, analysisFinalRetry } = processingQueue[queuePosition];
+    const { index, historicalFailure } = processingQueue[queuePosition];
     const zero = index - 1;
     const directionDir = path.join(directionsDir, String(index).padStart(2, "0"));
     await fs.mkdir(directionDir, { recursive: true });
@@ -1236,7 +1407,7 @@ export async function generateDirections({
       await writeJsonAtomic(manifestFile, manifest);
     }
     const forceRegeneration = invalidatedDirections.has(index);
-    let cachedSpec = forceRegeneration ? null : await readJson(specFile);
+    const legacySpec = forceRegeneration ? null : await readJson(specFile);
     const type = directionTypes?.[zero] || (index <= 6 ? "popup" : index <= 8 ? "banner" : "float");
     const typeIndex = directionTypes
       ? directionTypes.slice(0, zero).filter((candidate) => candidate === type).length
@@ -1270,14 +1441,14 @@ export async function generateDirections({
     const referenceFiles = [reference.file];
     const attachmentReceiptFile = path.join(directionDir, "reference-attachments.json");
     let attachmentReceipt = await readJson(attachmentReceiptFile);
-    if (cachedSpec && !referenceAnalysisReceiptValid(attachmentReceipt, referenceFiles)) cachedSpec = null;
     const size = type === "popup" ? { width: 1002, height: 1335 } : type === "banner" ? { width: 1140, height: 240 } : { width: 240, height: 240 };
     const previewFile = path.join(directionDir, "preview.png");
     let lastError;
     let chatOpened = false;
     const savedDirectionChat = () => manifest.directionChats[String(index)]?.url
       || (manifest.failures || []).find((item) => item.index === index)?.chatUrl;
-    let referencesAttached = false;
+    let referenceAvailableInConversation = generationReferenceReceiptValid(attachmentReceipt, referenceFiles)
+      && Boolean(savedDirectionChat());
     const rememberConversation = async () => {
       const url = conversationUrl(page.url());
       if (!url) return null;
@@ -1333,53 +1504,6 @@ export async function generateDirections({
 
     try {
       if (shouldStop()) throw workflowAbortedError();
-      if (!cachedSpec) {
-        const finalAnalysisAttempt = historicalFailure || analysisFinalRetry;
-        const analysisAttempts = analysisAttemptLimit(config, finalAnalysisAttempt);
-        cachedSpec = await runDirectionStageAttempts({
-          attempts: analysisAttempts,
-          stage: "analysis",
-          label: "参考分析",
-          operation: async () => {
-            const attemptStartedAt = Date.now();
-            await ensureDirectionChat();
-            if (referenceUploadRequired(cachedSpec, referencesAttached)) {
-              const attachment = await attachFiles(page, referenceFiles);
-              attachmentReceipt = {
-                files: attachment.expectedNames,
-                verifiedAt: new Date().toISOString(),
-                analysisAcceptedAt: null
-              };
-              await writeJsonAtomic(attachmentReceiptFile, attachmentReceipt);
-              referencesAttached = true;
-            }
-            const analysis = await sendAndRead(
-              page,
-              analysisPrompt(index, type),
-              remainingAttemptTimeout(attemptStartedAt, minuteTimeout(config.generation.analysisTimeoutMinutes))
-            );
-            await rememberConversation();
-            if (assistantReportsMissingReferenceImages(analysis.text)) {
-              throw new Error("ChatGPT 明确表示未收到参考图，下一次尝试将重新上传");
-            }
-            const spec = extractJson(analysis.text);
-            await fs.writeFile(path.join(directionDir, "analysis.txt"), analysis.text, "utf8");
-            await writeJsonAtomic(specFile, spec);
-            attachmentReceipt = { ...attachmentReceipt, analysisAcceptedAt: new Date().toISOString() };
-            await writeJsonAtomic(attachmentReceiptFile, attachmentReceipt);
-            return spec;
-          },
-          onFailure: async ({ attempt, error }) => {
-            referencesAttached = false;
-            if (chatOpened) await rememberConversation().catch(() => {});
-            console.error(`第 ${index} 套参考分析第 ${attempt}/${analysisAttempts} 次失败：${error.message}`);
-            await screenshotFailure(page, path.join(directionDir, `analysis-error-attempt-${attempt}.png`));
-            await stopActiveResponse(page).catch(() => false);
-            chatOpened = false;
-          }
-        });
-      }
-
       if (forceRegeneration || !(await validImageFile(previewFile))) {
         const previewAttempts = directionAttemptLimit(config, historicalFailure);
         await runDirectionStageAttempts({
@@ -1389,21 +1513,43 @@ export async function generateDirections({
           operation: async () => {
             const attemptStartedAt = Date.now();
             await ensureDirectionChat();
-            // The analysis attachment is consumed by the previous turn; make
-            // the preview request explicitly reference-conditioned.
-            await attachFiles(page, referenceFiles);
+            if (generationReferenceUploadRequired(attachmentReceipt, referenceFiles, referenceAvailableInConversation)) {
+              const attachment = await attachFiles(page, referenceFiles);
+              attachmentReceipt = {
+                files: attachment.expectedNames,
+                verifiedAt: new Date().toISOString(),
+                generationSubmittedAt: null,
+                chatUrl: conversationUrl(page.url()) || savedDirectionChat() || null
+              };
+              await writeJsonAtomic(attachmentReceiptFile, attachmentReceipt);
+            }
             const previewImageSources = await visibleImageSources(page);
-            await sendPrompt(page, previewPrompt(cachedSpec, size.width, size.height, type, index));
+            const assistantBaseline = await page.locator('[data-message-author-role="assistant"]').count();
+            await sendPrompt(page, directGenerationPrompt(index, type, size.width, size.height));
+            referenceAvailableInConversation = true;
+            attachmentReceipt = {
+              ...attachmentReceipt,
+              files: attachmentReceipt?.files || referenceFiles.map((file) => path.basename(file)),
+              generationSubmittedAt: new Date().toISOString(),
+              chatUrl: conversationUrl(page.url()) || savedDirectionChat() || null
+            };
+            await writeJsonAtomic(attachmentReceiptFile, attachmentReceipt);
             await saveLastAssistantImage(
               page,
               previewFile,
               remainingAttemptTimeout(attemptStartedAt, minuteTimeout(config.generation.imageTimeoutMinutes)),
               previewImageSources,
-              referenceFiles
+              referenceFiles,
+              assistantBaseline
             );
             await rememberConversation();
           },
           onFailure: async ({ attempt, error }) => {
+            if (error.code === "REFERENCE_ATTACHMENT_MISSING") {
+              referenceAvailableInConversation = false;
+              attachmentReceipt = { ...attachmentReceipt, generationSubmittedAt: null };
+              await writeJsonAtomic(attachmentReceiptFile, attachmentReceipt);
+            }
             if (chatOpened) await rememberConversation().catch(() => {});
             console.error(`第 ${index} 套预览生成第 ${attempt}/${previewAttempts} 次失败：${error.message}`);
             await screenshotFailure(page, path.join(directionDir, `error-attempt-${attempt}.png`));
@@ -1435,7 +1581,7 @@ export async function generateDirections({
 
       const entry = {
         index, status: "ready", type, contentScope: type === "popup" ? "popup-only" : "full-canvas", ...size, previewFile,
-        specFile: path.join(directionDir, "spec.json"),
+        ...(legacySpec ? { specFile } : {}),
         layersFile: path.join(directionDir, "layers.json"),
         decompositionReport: path.join(directionDir, "layers", "decomposition-report.json"),
         transparentAssetCount: layers.layers.filter(isRasterAsset).length,
@@ -1443,8 +1589,8 @@ export async function generateDirections({
         sourceUrls: [reference.sourceUrl],
         chatUrl,
         chatTitle,
-        keywords: cachedSpec.keywords || [],
-        copy: cachedSpec.copy || {}
+        keywords: legacySpec?.keywords || [],
+        copy: legacySpec?.copy || {}
       };
       manifest.directions = manifest.directions.filter((item) => item.index !== index).concat(entry).sort((a, b) => a.index - b.index);
       clearDirectionFailure(manifest, index);
@@ -1468,11 +1614,7 @@ export async function generateDirections({
       };
       recordDirectionFailure(manifest, failure);
       await writeJsonAtomic(manifestFile, manifest);
-      const deferred = enqueueAnalysisFinalRetry(processingQueue, index, {
-        stage: failure.stage,
-        finalRetry: historicalFailure || analysisFinalRetry
-      });
-      console.error(`第 ${index} 套连续 ${failure.attempts} 次失败，已记录并${deferred ? "排到队尾最终重试" : "继续下一套"}：${failure.message}`);
+      console.error(`第 ${index} 套连续 ${failure.attempts} 次失败，已记录并继续下一套：${failure.message}`);
       await stopActiveResponse(page).catch(() => false);
     }
   }

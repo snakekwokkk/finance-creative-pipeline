@@ -6,8 +6,6 @@ import test from "node:test";
 import sharp from "sharp";
 import {
   activeDirectionFailures,
-  analysisAttemptLimit,
-  analysisPrompt,
   assistantReportsMissingReferenceImages,
   attachmentDeliveryStatus,
   chatGptLoginRequired,
@@ -17,24 +15,28 @@ import {
   dailyProjectName,
   decompositionAttemptLimit,
   decompositionAttemptsExhausted,
+  decompositionJsonResponses,
   decompositionPrompt,
+  embeddedLayerIds,
   directionAttemptLimit,
-  enqueueAnalysisFinalRetry,
   directionProcessingOrder,
   directionChatTitle,
   directionChatBootstrapPrompt,
   promptSubmissionObserved,
-  previewPrompt,
+  directGenerationPrompt,
   parseReferenceAudit,
   projectBaseUrl,
   readyDirectionsForFigma,
   referenceAuditChatTitle,
   referenceAuditPrompt,
+  reconstructedAssetPrompt,
   recordDirectionFailure,
   rejectedReferenceSourceSet,
-  referenceAnalysisReceiptValid,
-  referenceUploadRequired,
+  generationReferenceReceiptValid,
+  generationReferenceUploadRequired,
+  latestNewDecompositionResponse,
   requiresUserAction,
+  rasterNeedsReconstruction,
   runDecompositionAttempts,
   runDirectionStageAttempts,
   runTransparentAssetAttempts,
@@ -86,23 +88,31 @@ test("reference upload readiness does not depend on the file input retaining its
   }).ready, true);
 });
 
-test("missing-reference replies force a verified re-upload and old specs need a receipt", () => {
+test("direct generation reuses a verified reference receipt and supports legacy receipts", () => {
   assert.equal(assistantReportsMissingReferenceImages("我目前看不到所说的参考图，请重新上传。"), true);
   assert.equal(assistantReportsMissingReferenceImages("I cannot see the uploaded reference images."), true);
   assert.equal(assistantReportsMissingReferenceImages("已分析参考图，下面输出设计规格。"), false);
   const files = ["/tmp/01-popup.webp"];
-  assert.equal(referenceAnalysisReceiptValid({
+  assert.equal(generationReferenceReceiptValid({
+    files: ["01-popup.webp"],
+    generationSubmittedAt: "2026-08-07T08:00:00.000Z"
+  }, files), true);
+  assert.equal(generationReferenceReceiptValid({
     files: ["01-popup.webp"],
     analysisAcceptedAt: "2026-08-04T08:00:00.000Z"
   }, files), true);
-  assert.equal(referenceAnalysisReceiptValid({
+  assert.equal(generationReferenceReceiptValid({
     files: ["01-popup.webp", "02-popup.webp"],
     analysisAcceptedAt: "2026-08-04T08:00:00.000Z"
   }, files), true);
-  assert.equal(referenceAnalysisReceiptValid({ files: ["01-popup.webp"] }, files), false);
-  assert.equal(referenceUploadRequired(null, false), true);
-  assert.equal(referenceUploadRequired({ composition: "cached" }, false), false);
-  assert.equal(referenceUploadRequired(null, true), false);
+  assert.equal(generationReferenceReceiptValid({ files: ["01-popup.webp"] }, files), false);
+  assert.equal(generationReferenceUploadRequired(null, files, false), true);
+  const submitted = {
+    files: ["01-popup.webp"],
+    generationSubmittedAt: "2026-08-07T08:00:00.000Z"
+  };
+  assert.equal(generationReferenceUploadRequired(submitted, files, true), false);
+  assert.equal(generationReferenceUploadRequired(submitted, files, false), true);
 });
 
 test("daily ChatGPT projects and direction chat URLs are deterministic", () => {
@@ -192,19 +202,16 @@ REFERENCE_AUDIT_END`, [candidates[0]], 60);
 REFERENCE_AUDIT_END`, candidates), /漏掉候选/);
 });
 
-test("popup prompts generate and decompose only the popup body", () => {
-  const specPrompt = analysisPrompt(1, "popup");
-  const imagePrompt = previewPrompt({ imagePrompt: "红色金融弹窗" }, 1002, 1335, "popup");
+test("direct popup generation internally analyzes one attachment and outputs only an image", () => {
+  const imagePrompt = directGenerationPrompt(1, "popup", 1002, 1335);
   const layersPrompt = decompositionPrompt(1, 1002, 1335, 4, "popup");
-  assert.match(specPrompt, /只分析和设计弹窗本体/);
-  assert.match(specPrompt, /一张参考图/);
-  assert.match(specPrompt, /不要把参考图中的 App 页面/);
+  assert.match(imagePrompt, /先在内部理解我上传的第1套参考图/);
+  assert.match(imagePrompt, /直接生成且只生成一张/);
+  assert.match(imagePrompt, /不要输出分析过程、设计规格、提示词、JSON 或文字说明/);
   assert.match(imagePrompt, /弹窗素材，不是完整 App 页面/);
   assert.match(imagePrompt, /不生成或暗示 App 页面/);
-  assert.match(specPrompt, /红包可继续使用红包或相近的金融权益材质/);
-  assert.doesNotMatch(specPrompt, /60%|至少在构图/);
-  assert.match(imagePrompt, /保留与参考图相近的主视觉类别/);
-  assert.doesNotMatch(imagePrompt, /60%|至少三项/);
+  assert.match(imagePrompt, /保留相近的金融视觉语义/);
+  assert.doesNotMatch(imagePrompt, /FINANCE_SPEC_START|imagePrompt|referenceStructure/);
   assert.match(layersPrompt, /只输出属于弹窗本体的图层/);
   assert.match(layersPrompt, /不得创建 Background\/AppInterface/);
   assert.doesNotMatch(layersPrompt, /"id":"background"/);
@@ -227,6 +234,51 @@ test("decomposition asks ChatGPT to keep machine JSON visually compact", () => {
   assert.match(layersPrompt, /JSON内部不得换行或缩进/);
   assert.doesNotMatch(marked[1], /\n/);
   assert.equal(JSON.parse(marked[1]).canvas.width, 1140);
+});
+
+test("decomposition marker listener finds completed JSON and ignores the prompt example", () => {
+  const promptExample = `DECOMPOSE_START
+{"schemaVersion":4,"canvas":{"width":1002,"height":1335},"layers":[]}
+DECOMPOSE_END`;
+  const firstPayload = {
+    schemaVersion: 4,
+    canvas: { width: 1002, height: 1335 },
+    layers: [{ id: "title", kind: "text", editable: "text", text: "限时权益" }]
+  };
+  const firstResponse = `DECOMPOSE_START\n${JSON.stringify(firstPayload)}\nDECOMPOSE_END`;
+  const pageText = `用户提示\n${promptExample}\n助手回复\n${firstResponse}`;
+
+  const parsed = decompositionJsonResponses(pageText);
+  assert.equal(parsed.length, 1);
+  assert.deepEqual(parsed[0].payload, firstPayload);
+  assert.deepEqual(latestNewDecompositionResponse([pageText], new Set())?.payload, firstPayload);
+});
+
+test("decomposition retry reuses a late complete response before sending again", () => {
+  const firstPayload = {
+    schemaVersion: 4,
+    canvas: { width: 1002, height: 1335 },
+    layers: [{ id: "card", kind: "card", editable: "vector" }]
+  };
+  const secondPayload = {
+    schemaVersion: 4,
+    canvas: { width: 1002, height: 1335 },
+    layers: [{ id: "hero", kind: "hero", editable: "raster" }]
+  };
+  const firstResponse = `DECOMPOSE_START\n${JSON.stringify(firstPayload)}\nDECOMPOSE_END`;
+  const secondResponse = `DECOMPOSE_START\n${JSON.stringify(secondPayload)}\nDECOMPOSE_END`;
+  const known = new Set(decompositionJsonResponses(firstResponse).map((response) => response.key));
+
+  assert.equal(latestNewDecompositionResponse([firstResponse], known), null);
+  assert.deepEqual(
+    latestNewDecompositionResponse([`${firstResponse}\n${secondResponse}`], new Set())?.payload,
+    secondPayload
+  );
+  assert.deepEqual(
+    latestNewDecompositionResponse([`${firstResponse}\n${secondResponse}`], known)?.payload,
+    secondPayload
+  );
+  assert.equal(latestNewDecompositionResponse(["DECOMPOSE_START\n{\"schemaVersion\":4"], known), null);
 });
 
 test("each direction receives one reference from its matching creative type", () => {
@@ -285,28 +337,22 @@ test("resumed runs process new directions before previously failed directions", 
   assert.equal(directionAttemptLimit({ generation: { maxAttempts: 2 } }, true), 1);
 });
 
-test("reference analysis has two attempts plus one queue-tail final retry", async () => {
-  assert.equal(analysisAttemptLimit({}), 2);
-  assert.equal(analysisAttemptLimit({ generation: { analysisMaxAttempts: 2 } }, true), 1);
+test("direct preview generation keeps its bounded retry budget", async () => {
+  assert.equal(directionAttemptLimit({ generation: { maxAttempts: 2 } }), 2);
   let operations = 0;
   await assert.rejects(
     runDirectionStageAttempts({
       attempts: 2,
-      stage: "analysis",
-      label: "参考分析",
+      stage: "generation",
+      label: "预览生成",
       operation: async () => {
         operations += 1;
         throw new Error("timeout");
       }
     }),
-    (error) => error.stage === "analysis" && error.attempts === 2
+    (error) => error.stage === "generation" && error.attempts === 2
   );
   assert.equal(operations, 2);
-  const queue = [{ index: 1, historicalFailure: false, analysisFinalRetry: false }];
-  assert.equal(enqueueAnalysisFinalRetry(queue, 1, { stage: "analysis", finalRetry: false }), true);
-  assert.deepEqual(queue[1], { index: 1, historicalFailure: false, analysisFinalRetry: true });
-  assert.equal(enqueueAnalysisFinalRetry(queue, 1, { stage: "analysis", finalRetry: false }), false);
-  assert.equal(enqueueAnalysisFinalRetry(queue, 2, { stage: "generation", finalRetry: false }), false);
 });
 
 test("semantic decomposition has at most two independent attempts", async () => {
@@ -327,6 +373,21 @@ test("semantic decomposition has at most two independent attempts", async () => 
   assert.equal(result, "ready");
   assert.equal(operations, 2);
   assert.equal(recoveries, 1);
+});
+
+test("only large composite raster layers trigger GPT text removal and completion", () => {
+  const hero = { id: "shell", editable: "raster", bbox: { x: 0.05, y: 0.05, width: 0.9, height: 0.85 }, zIndex: 1, assetPrompt: "礼盒框架" };
+  const title = { id: "title", editable: "text", bbox: { x: 0.2, y: 0.2, width: 0.6, height: 0.1 }, zIndex: 5, text: "活动标题" };
+  const button = { id: "button", editable: "vector", kind: "button", bbox: { x: 0.25, y: 0.7, width: 0.5, height: 0.1 }, zIndex: 5 };
+  const badge = { id: "badge", editable: "raster", bbox: { x: 0.08, y: 0.1, width: 0.12, height: 0.12 }, zIndex: 4 };
+  const layers = [hero, title, button, badge];
+  assert.deepEqual(embeddedLayerIds(layers, hero), ["title", "button", "badge"]);
+  assert.equal(rasterNeedsReconstruction(hero, layers), true);
+  assert.equal(rasterNeedsReconstruction(badge, layers), false);
+  const prompt = reconstructedAssetPrompt(hero, [title, button]);
+  assert.match(prompt, /移除并补全/);
+  assert.match(prompt, /活动标题/);
+  assert.match(prompt, /纯白背景/);
 });
 
 test("exhausted decomposition attempts are stage-specific and do not consume generation retries", async () => {

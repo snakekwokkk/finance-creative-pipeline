@@ -5,9 +5,11 @@ import path from "node:path";
 import test from "node:test";
 import sharp from "sharp";
 import {
+  RECONSTRUCTED_ASSET_ENGINE,
   TRANSPARENT_ASSET_ENGINE,
   assignAssetIndices,
   boxToPixels,
+  extractReconstructedAsset,
   recoverAcceptedAsset,
   reportAssetsReady,
   validateSeparateAsset,
@@ -88,4 +90,80 @@ test("opaque or colored backgrounds are rejected", async (t) => {
   const result = await validateSeparateAsset({ candidateFile, layer, outputDir: root });
   assert.equal(result.status, "rejected");
   assert.match(result.reason, /透明 Alpha/);
+});
+
+test("tight small assets are retained with warnings instead of being discarded", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "finance-tight-asset-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const candidateFile = path.join(root, "candidate.png");
+  await sharp({ create: { width: 100, height: 100, channels: 4, background: { r: 255, g: 90, b: 30, alpha: 0.8 } } })
+    .png()
+    .toFile(candidateFile);
+  const layer = plan().layers.find((item) => item.id === "hero");
+  const retained = await validateSeparateAsset({ candidateFile, layer, outputDir: root });
+  assert.equal(retained.status, "accepted");
+  assert.equal(retained.quality, "tight-crop");
+  assert.ok(retained.warnings.some((warning) => warning.includes("紧裁小素材保留")));
+  const rejected = await validateSeparateAsset({
+    candidateFile,
+    layer,
+    outputDir: root,
+    thresholds: { allowTightCrop: false }
+  });
+  assert.equal(rejected.status, "rejected");
+});
+
+test("a partially extracted direction remains usable when at least one raster exists", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "finance-partial-assets-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourceImage = path.join(root, "preview.png");
+  const outputDir = path.join(root, "layers");
+  const acceptedFile = path.join(outputDir, "01-hero.png");
+  await fs.mkdir(outputDir, { recursive: true });
+  await sharp({ create: { width: 100, height: 100, channels: 4, background: "#ffffff" } }).png().toFile(sourceImage);
+  await sharp({ create: { width: 40, height: 40, channels: 4, background: { r: 255, g: 0, b: 0, alpha: 0.8 } } }).png().toFile(acceptedFile);
+  const assigned = assignAssetIndices({
+    schemaVersion: 4,
+    canvas: { width: 100, height: 100 },
+    layers: [
+      { id: "hero", kind: "hero", editable: "raster", bbox: { x: 0.1, y: 0.1, width: 0.4, height: 0.4 } },
+      { id: "badge", kind: "decoration", editable: "raster", bbox: { x: 0.6, y: 0.1, width: 0.2, height: 0.2 } }
+    ]
+  });
+  const report = await writeDecompositionReport({
+    plan: assigned,
+    sourceImage,
+    outputDir,
+    assetResults: new Map([["hero", {
+      status: "accepted",
+      engine: RECONSTRUCTED_ASSET_ENGINE,
+      sourcePixelExact: false,
+      reconstructedByChatGpt: true,
+      file: acceptedFile,
+      intrinsicPx: { width: 40, height: 40 }
+    }]])
+  });
+  assert.equal(report.status, "partial");
+  assert.equal(report.transparentAssets.acceptedCount, 1);
+  assert.equal(report.transparentAssets.rejectedCount, 1);
+  assert.equal(report.layers[0].extractionMode, "chatgpt-reconstructed-asset");
+  assert.ok(await reportAssetsReady(report));
+});
+
+test("a ChatGPT completion on a uniform background is locally matted with explicit provenance", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "finance-reconstructed-asset-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const candidateFile = path.join(root, "candidate.png");
+  const outputDir = path.join(root, "layers");
+  await sharp({ create: { width: 300, height: 300, channels: 3, background: "#ffffff" } })
+    .composite([{ input: Buffer.from('<svg width="160" height="160"><circle cx="80" cy="80" r="70" fill="#ff5522"/></svg>'), left: 70, top: 70 }])
+    .png()
+    .toFile(candidateFile);
+  const layer = plan().layers.find((item) => item.id === "hero");
+  const result = await extractReconstructedAsset({ candidateFile, layer, outputDir });
+  assert.equal(result.status, "accepted");
+  assert.equal(result.engine, RECONSTRUCTED_ASSET_ENGINE);
+  assert.equal(result.sourcePixelExact, false);
+  assert.equal(result.reconstructedByChatGpt, true);
+  assert.ok((await sharp(result.file).metadata()).hasAlpha);
 });
