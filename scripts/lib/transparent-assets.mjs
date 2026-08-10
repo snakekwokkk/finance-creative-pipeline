@@ -56,7 +56,12 @@ export function boxToPixels(box, width, height) {
     ? (Number(box[2]) > Number(box[0]) && Number(box[3]) > Number(box[1])
       ? { x: box[0], y: box[1], width: Number(box[2]) - Number(box[0]), height: Number(box[3]) - Number(box[1]) }
       : { x: box[0], y: box[1], width: box[2], height: box[3] })
-    : box;
+    : {
+        x: box?.x,
+        y: box?.y,
+        width: box?.width ?? box?.w,
+        height: box?.height ?? box?.h
+      };
   const normalized = [values?.x, values?.y, values?.width, values?.height]
     .every((value) => Number(value) >= 0 && Number(value) <= 1);
   const x = normalized ? Number(values.x) * width : Number(values?.x || 0);

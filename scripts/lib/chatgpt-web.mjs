@@ -1080,7 +1080,7 @@ export function decompositionPrompt(index, width, height, maxAssets, type) {
   const floatRule = type === "float"
     ? "\n\n这是浮窗/单元素方向。只输出参考图中的独立金融主体及可选按钮，不要补出完整页面、长海报或环境背景；一个 3D 素材、插图、红包、金币、徽章或‘元素+按钮’也可以作为完整方向。"
     : "";
-  return `直接分析当前对话中刚生成的第${index}套完整运营预览图（${width}x${height}），无需上传或重新上传该图，输出供 Figma 重构的图层 JSON。逐层输出背景、卡片、按钮、文字、图标、装饰和主视觉。视觉上连成一体、共同构成一个主视觉的复杂对象必须合并为一个 raster 组，例如“盾牌+箭头+基座+附属金币”或“红包+挂件+贴附飘带”；不要把同一主视觉拆成多个会错位的零件。只有空间上彼此独立、可单独移动的复杂视觉才分成不同 raster。每个 raster 的 bbox 必须紧贴完整主体并留约 3% 安全边距，且不得包含文字。每层提供0到1的bbox、zIndex、confidence，并增加 nativeFidelity（用 Figma 基础图形和文字重建的预计完成度）。${popupRule}${floatRule}\n\neditable只能是background、raster、vector或text。nativeFidelity < 0.8，或对象包含复杂 3D 材质、渐变折面、立体徽章、复杂插图、独特主视觉时，editable 必须为 raster；nativeFidelity >= 0.8 且确实是简单几何、普通功能图标、文字或纯色按钮时才用 vector/text。最多 ${maxAssets} 个 raster，每个复杂主视觉组必须有唯一 id 和 assetPrompt。每个普通功能图标使用kind=icon，并增加icon对象：query用2到4个简短英文词准确描述图标语义，style只可为line或fill，color使用原图十六进制颜色。\n\n只输出以下标记包裹的合法JSON，不要解释。严格只用三行：第一行DECOMPOSE_START，第二行是完整的单行紧凑JSON，第三行DECOMPOSE_END。JSON内部不得换行或缩进，不要使用Markdown代码块。\nDECOMPOSE_START\n{"schemaVersion":4,"canvas":{"width":${width},"height":${height}},"layers":[]}\nDECOMPOSE_END\n\n必须把识别出的完整 layers 数组填入 JSON；不要改写文字，不要猜看不清的内容，不要输出蒙版或多边形。`;
+  return `直接分析当前对话中刚生成的第${index}套完整运营预览图（${width}x${height}），无需上传或重新上传该图，输出供 Figma 按像素坐标复原的图层 JSON。逐层输出背景、卡片、按钮、文字、图标、装饰和主视觉。Preview 是唯一视觉真值，不要重新排版或优化间距。视觉上连成一体、共同构成一个主视觉的复杂对象必须合并为一个 raster 组，例如“盾牌+箭头+基座+附属金币”或“红包+挂件+贴附飘带”；不要把同一主视觉拆成多个会错位的零件。只有空间上彼此独立、可单独移动的复杂视觉才分成不同 raster。每层 bbox 必须使用无歧义对象 {x,y,width,height}，四个值均为0到1，严格对应当前预览中的左上角和宽高；禁止数组 bbox，禁止使用 w/h 别名。每个 raster 的 bbox 必须紧贴完整主体并留约 3% 安全边距，且不得包含文字。每层提供 zIndex、confidence、visualImpact（critical、supporting或minor）和 nativeFidelity（用 Figma 基础图形和文字重建的预计完成度）；移除后会留下明显空洞、破坏阅读或改变构图的图层必须标为 critical。${popupRule}${floatRule}\n\neditable只能是background、raster、vector或text。nativeFidelity < 0.95，或对象包含复杂卡片框架、阴影、玻璃、纹理、3D 材质、渐变折面、立体徽章、复杂插图、独特主视觉时，editable 必须为 raster；nativeFidelity >= 0.95 且确实是简单几何、普通功能图标、文字或纯色按钮时才用 vector/text。复杂弹窗框架应作为去除文字和按钮后的完整 raster 底板，避免在 Figma 中用普通矩形近似材质。最多 ${maxAssets} 个 raster，每个复杂主视觉组必须有唯一 id 和 assetPrompt。每个普通功能图标使用kind=icon，并增加icon对象：query用2到4个简短英文词准确描述图标语义，style只可为line或fill，color使用原图十六进制颜色。\n\n只输出以下标记包裹的合法JSON，不要解释。严格只用三行：第一行DECOMPOSE_START，第二行是完整的单行紧凑JSON，第三行DECOMPOSE_END。JSON内部不得换行或缩进，不要使用Markdown代码块。\nDECOMPOSE_START\n{"schemaVersion":4,"bboxFormat":"normalized-xywh-object","canvas":{"width":${width},"height":${height}},"layers":[]}\nDECOMPOSE_END\n\n必须把识别出的完整 layers 数组填入 JSON；不要改写文字，不要猜看不清的内容，不要输出蒙版或多边形。`;
 }
 
 function normalizedLayerBox(layer) {
@@ -1093,7 +1093,7 @@ function normalizedLayerBox(layer) {
       ? { x, y, width: third - x, height: fourth - y }
       : { x, y, width: third, height: fourth };
   }
-  return { x: Number(box.x), y: Number(box.y), width: Number(box.width), height: Number(box.height) };
+  return { x: Number(box.x), y: Number(box.y), width: Number(box.width ?? box.w), height: Number(box.height ?? box.h) };
 }
 
 export function embeddedLayerIds(layers, rasterLayer) {

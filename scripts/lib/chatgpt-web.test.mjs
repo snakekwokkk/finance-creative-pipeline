@@ -284,7 +284,9 @@ test("direct popup generation internally analyzes one attachment and outputs onl
 test("decomposition records searchable Remix Icon semantics instead of invented paths", () => {
   const layersPrompt = decompositionPrompt(7, 1140, 240, 4, "banner");
   assert.match(layersPrompt, /每个普通功能图标使用kind=icon/);
-  assert.match(layersPrompt, /nativeFidelity < 0\.8/);
+  assert.match(layersPrompt, /Preview 是唯一视觉真值/);
+  assert.match(layersPrompt, /nativeFidelity < 0\.95/);
+  assert.match(layersPrompt, /bbox 必须使用无歧义对象 \{x,y,width,height\}/);
   assert.match(layersPrompt, /共同构成一个主视觉的复杂对象必须合并为一个 raster 组/);
   assert.match(layersPrompt, /不要把同一主视觉拆成多个会错位的零件/);
 });

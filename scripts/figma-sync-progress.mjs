@@ -57,7 +57,8 @@ if (action === "inspect") {
     readyDirections,
     index,
     nodeId: value("--node-id"),
-    uploadedAssetCount: Number(value("--uploaded-assets") || 0)
+    uploadedAssetCount: Number(value("--uploaded-assets") || 0),
+    qaReportFile: value("--qa-report")
   });
 } else if (action === "fail") {
   state = await failFigmaDirection({

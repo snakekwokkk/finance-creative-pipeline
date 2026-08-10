@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { loadPassingFigmaQaReport } from "./figma-visual-qa.mjs";
 import { readJson, writeJsonAtomic } from "./state.mjs";
 
 export const FIGMA_SYNC_SCHEMA_VERSION = 1;
@@ -192,7 +193,8 @@ export async function completeFigmaDirection({
   readyDirections,
   index,
   nodeId,
-  uploadedAssetCount = 0
+  uploadedAssetCount = 0,
+  qaReportFile
 }) {
   if (!Number.isInteger(uploadedAssetCount) || uploadedAssetCount < 0) {
     throw new Error("方向上传素材数必须是非负整数");
@@ -206,11 +208,21 @@ export async function completeFigmaDirection({
   if (previous.status !== "syncing" || previous.revision !== snapshot.revision) {
     throw new Error(`方向 ${index} 未以当前产物版本进入 syncing，不能标记视觉核验完成`);
   }
+  const qa = await loadPassingFigmaQaReport(qaReportFile, snapshot.direction);
   reconciled.state.directions[key] = {
     ...previous,
     status: "qa_passed",
     nodeId: completedNodeId,
     uploadedAssetCount,
+    qa: {
+      reportFile: qa.file,
+      reportSha256: qa.sha256,
+      similarity: qa.report.visual.similarity,
+      maxEdgeErrorPx: qa.report.geometry.maxEdgeErrorPx,
+      maxSizeErrorRatio: qa.report.geometry.maxSizeErrorRatio,
+      maxTextBaselineErrorPx: qa.report.geometry.maxTextBaselineErrorPx,
+      reviewedAt: qa.report.reviewedAt
+    },
     completedAt: now(),
     error: null
   };
@@ -245,7 +257,7 @@ export async function figmaCompletionSummary({ runDir, date, figma, readyDirecti
   const completed = [];
   for (const snapshot of reconciled.snapshots) {
     const entry = reconciled.state.directions[directionKey(snapshot.index)];
-    if (entry?.status !== "qa_passed" || entry.revision !== snapshot.revision || !entry.nodeId) {
+    if (entry?.status !== "qa_passed" || entry.revision !== snapshot.revision || !entry.nodeId || !entry.qa?.reportSha256) {
       incomplete.push({ index: snapshot.index, status: entry?.status || "pending" });
     } else {
       completed.push(entry);

@@ -24,7 +24,7 @@ Finance Creative Pipeline 是一个面向中国互联网金融运营素材的 Co
 2. 将每个方向的参考图只上传一次，让 ChatGPT 网页版在内部理解后直接生成一张品牌中性的完整预览图，不输出中间分析或提示词。
 3. 每天创建或复用一个日期项目，每个方向只使用一个项目内聊天；该方向的生图、语义拆图和必要的复杂框架补全都在同一聊天完成。
 4. 在同一聊天中直接要求 ChatGPT 基于刚生成的预览图识别复杂视觉元素并生成语义化 `layers.json`，不重复上传预览图。
-5. 按 80% 原生还原阈值优先从完整预览的源像素提取复杂视觉；大面积框架包含文字或按钮、无法直接分离时，由 ChatGPT 去字并补全遮挡区域。
+5. 按 95% 原生还原阈值优先从完整预览的源像素提取复杂视觉；大面积框架包含文字或按钮、无法直接分离时，由 ChatGPT 去字并补全遮挡区域。
 6. 每个方向完成后立即进入独立 Figma 队列；上一方向写入和核验 Figma 时，下一方向可继续在 ChatGPT 生图和拆图。
 
 默认正式运行会采集 10 张参考图并生成 10 个原创方向：6 个弹窗、2 个 Banner、2 个浮窗，每个方向使用 1 张同类型参考图。
@@ -34,7 +34,9 @@ Finance Creative Pipeline 是一个面向中国互联网金融运营素材的 Co
 - 图片生成必须使用 ChatGPT 网页版，不以 Codex 图片生成作为替代。
 - 每个方向生成一张完整预览图；不可原生重建的复杂素材从预览源像素分别提取为独立 PNG，不生成多元素素材板。
 - 弹窗方向只生成弹窗本体与干净的外部安全留白，不生成 App 页面、搜索栏、导航栏、底部 Tab、页面卡片或虚化界面背景。
-- 以 80% 原生还原阈值决定拆图；复杂主视觉、3D物体、人物、吉祥物、渐变折面、立体徽章、红包外壳和复杂插画低于阈值时逐元素拆分，真正简单的卡片、按钮、普通图标、图表和装饰才由 Figma 原生重构。
+- 以 95% 原生还原阈值决定拆图；复杂主视觉、3D物体、人物、吉祥物、复杂卡片框架、阴影、玻璃、纹理、渐变折面、立体徽章、红包外壳和复杂插画低于阈值时保留为去字位图底板，只有能达到 95% 的简单卡片、按钮、普通图标、图表和装饰才由 Figma 原生重构。
+- `preview.png` 是 Figma 复原的唯一视觉真值。所有图层按归一化 bbox 精确换算坐标和尺寸；素材画布内部禁止 Auto Layout，不允许手工近似摆放、重新居中或优化间距。
+- Figma 完成状态必须附带原尺寸 Editable 导出、实际几何回读、50% 叠图、差分热图和通过的 QA 报告。视觉相似度不得低于 95%，并同时满足位置、尺寸、文字基线、素材完整性和结构门槛；仅做左右截图对比不能通过。
 - 普通功能图标优先从 [Remix Icon](https://remixicon.com/) 匹配官方 SVG，并以可编辑矢量导入 Figma；不再手绘临时图标或使用无语义占位形状。
 - 参考图用于确定主视觉类别、材质气质、颜色关系和信息层级；可保留相近的金融主体（如红包或相近权益材质），同时重设计具体造型细节、文案和局部排布，避免完整照搬。
 - 透明素材优先使用本地背景差分从最终预览中直接抠取。大面积复杂框架包含多个内部图层时，才在同一聊天中让 ChatGPT 去字并补全；报告会明确区分源像素与 GPT 补全素材。视觉上连成一体的复杂主视觉仍作为一个整体。
@@ -298,7 +300,9 @@ A normal run collects 10 references and generates 10 original directions: six po
 - Image generation must use ChatGPT Web. Codex image generation is not a fallback.
 - Generate exactly one complete preview; never combine multiple extracted assets into one sheet or image.
 - Popup directions generate only the popup body with a clean outer safety margin. They must not generate an App page, search bar, navigation, bottom tabs, page cards, or a blurred interface background.
-- Use an 80% native-fidelity threshold: complex hero visuals, 3D objects, people, mascots, gradient folds, embossed badges, envelope shells, and non-reconstructable illustrations below the threshold become separate PNG assets. Truly simple cards, buttons, ordinary icons, charts, and decorations stay native in Figma.
+- Use a 95% native-fidelity threshold: complex hero visuals, 3D objects, people, mascots, composite card frameworks, shadows, glass, textures, gradient folds, embossed badges, envelope shells, and non-reconstructable illustrations below the threshold become text-free raster bases. Only simple cards, buttons, ordinary icons, charts, and decorations that can reach 95% stay native in Figma.
+- Treat `preview.png` as the sole visual truth for Figma reconstruction. Convert every normalized bbox to exact canvas coordinates and dimensions; prohibit Auto Layout inside artwork canvases and never approximate, re-center, or optimize the composition.
+- Require a native-resolution Editable export, actual Figma geometry readback, 50% overlay, difference heatmap, and passing QA report before completion. Similarity must be at least 95% while position, size, text baseline, asset completeness, and structural checks also pass; side-by-side screenshots alone are not sufficient.
 - Match ordinary functional icons against official [Remix Icon](https://remixicon.com/) SVGs first and import them as editable Figma vectors instead of hand-drawing temporary icons or using generic placeholders.
 - References provide the visual category, material feel, color relationship, and information hierarchy. Generated work may retain a similar financial subject while redesigning concrete shape details, copy, and local layout instead of copying the full design.
 - Transparent assets use local source-pixel matting first. Large composite frames that enclose editable overlays may use a provenance-marked ChatGPT reconstruction fallback in the same chat. Visually connected hero objects stay grouped as one asset.

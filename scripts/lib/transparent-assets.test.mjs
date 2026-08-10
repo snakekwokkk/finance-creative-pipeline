@@ -34,6 +34,15 @@ test("normalized x-y-width-height bboxes remain supported", () => {
   });
 });
 
+test("normalized object bboxes support legacy w and h aliases without collapsing to one pixel", () => {
+  assert.deepEqual(boxToPixels({ x: 0.547, y: 0.052, w: 0.355, h: 0.793 }, 1140, 240), {
+    left: 624,
+    top: 12,
+    width: 405,
+    height: 190
+  });
+});
+
 function plan() {
   return assignAssetIndices({
     schemaVersion: 4,
