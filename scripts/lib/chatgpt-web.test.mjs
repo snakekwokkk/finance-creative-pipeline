@@ -10,13 +10,17 @@ import {
   attachmentDeliveryStatus,
   chatGptLoginRequired,
   chatGptSessionAuthenticated,
+  chatStageMonitoringTimeout,
+  chatStageSubmissionDisposition,
   clearDirectionFailure,
   conversationUrl,
+  conversationApiImageCandidates,
   conversationApiSnapshotTexts,
   dailyProjectName,
   decompositionAttemptLimit,
   decompositionAttemptsExhausted,
   decompositionJsonResponses,
+  decompositionObservations,
   decompositionPrompt,
   embeddedLayerIds,
   directionAttemptLimit,
@@ -38,6 +42,7 @@ import {
   generationReferenceReceiptValid,
   generationReferenceUploadRequired,
   latestNewDecompositionResponse,
+  latestNewDecompositionObservation,
   latestReferenceAuditResponse,
   latestNewReferenceAuditObservation,
   referenceAuditObservations,
@@ -261,6 +266,25 @@ test("reference audit batches are submit-once and become passive monitors after 
   assert.equal(referenceAuditSubmissionDisposition(current, ["old1", "old2", "old3", "old4", "old5"]), "conflict");
 });
 
+test("all ChatGPT stages passively monitor an armed prompt instead of resubmitting", () => {
+  assert.equal(chatStageSubmissionDisposition(null, "prompt-a"), "submit");
+  assert.equal(chatStageSubmissionDisposition({ promptKey: "prompt-a", status: "armed" }, "prompt-a"), "monitor");
+  assert.equal(chatStageSubmissionDisposition({ promptKey: "prompt-a", status: "submission-unconfirmed" }, "prompt-a"), "monitor");
+  assert.equal(chatStageSubmissionDisposition({ promptKey: "prompt-a", status: "submitted-observed" }, "prompt-a"), "monitor");
+  assert.equal(chatStageSubmissionDisposition({ promptKey: "prompt-a", status: "armed" }, "prompt-b"), "conflict");
+  assert.equal(chatStageSubmissionDisposition({ promptKey: "prompt-a", status: "failed-confirmed" }, "prompt-a"), "submit");
+  assert.equal(chatStageSubmissionDisposition({ promptKey: "prompt-a", status: "rejected-confirmed" }, "prompt-b"), "submit");
+  assert.equal(chatStageSubmissionDisposition({ promptKey: "prompt-a", status: "completed" }, "prompt-a"), "monitor");
+  assert.equal(chatStageSubmissionDisposition({ promptKey: "prompt-a", status: "completed" }, "prompt-b"), "submit");
+});
+
+test("resumed ChatGPT stages use a short recovery window instead of waiting a full timeout again", () => {
+  const now = Date.parse("2026-08-10T14:00:00.000Z");
+  assert.equal(chatStageMonitoringTimeout(null, 300_000, now), 300_000);
+  assert.equal(chatStageMonitoringTimeout({ armedAt: "2026-08-10T13:59:00.000Z" }, 300_000, now), 240_000);
+  assert.equal(chatStageMonitoringTimeout({ armedAt: "2026-08-10T13:50:00.000Z" }, 300_000, now), 30_000);
+});
+
 test("reference audit recovery ignores incomplete JSON and selects the newest valid result", () => {
   const candidates = [{ pinId: "p1", imageUrl: "https://img.example/p1.webp" }];
   const first = `REFERENCE_AUDIT_START
@@ -311,6 +335,30 @@ test("reference audit listener reads assistant markers from saved conversation d
     }
   });
   assert.deepEqual(texts, ["REFERENCE_AUDIT_START\n{\"candidates\":[]}\nREFERENCE_AUDIT_END"]);
+});
+
+test("image monitoring reads generated image pointers from saved conversation data", () => {
+  const candidates = conversationApiImageCandidates({
+    mapping: {
+      user: { message: { author: { role: "user" }, create_time: 1, content: { parts: [{ content_type: "image_asset_pointer", asset_pointer: "file-service://reference-file" }] } } },
+      generated: {
+        message: {
+          author: { role: "tool" },
+          create_time: 2,
+          content: {
+            parts: [
+              { content_type: "image_asset_pointer", asset_pointer: "file-service://file-generated-123" },
+              { content_type: "image", image_url: "https://images.example/generated.png" }
+            ]
+          }
+        }
+      }
+    }
+  });
+  assert.deepEqual(candidates.map((item) => item.key), [
+    "file:file-generated-123",
+    "url:https://images.example/generated.png"
+  ]);
 });
 
 test("direct popup generation internally analyzes one attachment and outputs only an image", () => {
@@ -365,6 +413,17 @@ DECOMPOSE_END`;
   assert.equal(parsed.length, 1);
   assert.deepEqual(parsed[0].payload, firstPayload);
   assert.deepEqual(latestNewDecompositionResponse([pageText], new Set())?.payload, firstPayload);
+});
+
+test("decomposition listener reports a complete invalid result instead of waiting for timeout", () => {
+  const invalid = `DECOMPOSE_START
+{"schemaVersion":3,"layers":[{"id":"title"}]}
+DECOMPOSE_END`;
+  const observations = decompositionObservations(invalid);
+  assert.equal(observations.length, 1);
+  assert.equal(observations[0].valid, false);
+  assert.match(observations[0].error, /schemaVersion/);
+  assert.equal(latestNewDecompositionObservation([invalid])?.valid, false);
 });
 
 test("decomposition retry reuses a late complete response before sending again", () => {

@@ -69,6 +69,53 @@ export function conversationApiSnapshotTexts(payload) {
     .filter(Boolean);
 }
 
+export function conversationApiImageCandidates(payload) {
+  const candidates = [];
+  const seen = new Set();
+  const messages = Object.values(payload?.mapping || {})
+    .map((node) => node?.message)
+    .filter((message) => ["assistant", "tool"].includes(message?.author?.role))
+    .sort((left, right) => Number(left?.create_time || 0) - Number(right?.create_time || 0));
+
+  const add = (value, createdAt) => {
+    const source = String(value || "").trim();
+    if (!source) return;
+    const fileId = source.match(/^file-service:\/\/(.+)$/i)?.[1]
+      || source.match(/\b(file-[A-Za-z0-9_-]+)\b/)?.[1]
+      || null;
+    const url = /^https?:\/\//i.test(source) ? source : null;
+    if (!fileId && !url) return;
+    const key = fileId ? `file:${fileId}` : `url:${url}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    candidates.push({ key, fileId, url, createdAt: Number(createdAt || 0) });
+  };
+
+  const visit = (value, createdAt, imageContext = false) => {
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, createdAt, imageContext);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    const contentType = String(value.content_type || value.type || "");
+    const nextImageContext = imageContext || /image/i.test(contentType);
+    for (const [key, child] of Object.entries(value)) {
+      const keyIsImagePointer = /asset_pointer|image_url|image_asset|generated_image/i.test(key);
+      if (typeof child === "string" && (nextImageContext || keyIsImagePointer || /^file-service:\/\//i.test(child))) {
+        add(child, createdAt);
+      } else {
+        visit(child, createdAt, nextImageContext || keyIsImagePointer);
+      }
+    }
+  };
+
+  for (const message of messages) {
+    visit(message.content, message.create_time, false);
+    visit(message.metadata, message.create_time, false);
+  }
+  return candidates;
+}
+
 export function decompositionJsonResponses(text) {
   const responses = [];
   for (const block of markedJsonBlocks(text, "DECOMPOSE_START", "DECOMPOSE_END")) {
@@ -83,6 +130,37 @@ export function decompositionJsonResponses(text) {
     } catch {}
   }
   return responses;
+}
+
+export function decompositionObservations(text) {
+  const observations = [];
+  for (const block of markedJsonBlocks(text, "DECOMPOSE_START", "DECOMPOSE_END")) {
+    const key = block.json.trim();
+    try {
+      const payload = JSON.parse(key);
+      // Ignore the empty schema example embedded in the user's prompt.
+      if (Number(payload?.schemaVersion || 0) >= 4 && Array.isArray(payload?.layers) && payload.layers.length === 0) continue;
+      if (Number(payload?.schemaVersion || 0) < 4) throw new Error("schemaVersion 必须至少为 4");
+      if (!Array.isArray(payload?.layers) || !payload.layers.length) throw new Error("layers 必须是非空数组");
+      observations.push({ text: block.text, payload, key, valid: true });
+    } catch (error) {
+      observations.push({ text: block.text, payload: null, key, valid: false, error: error.message });
+    }
+  }
+  return observations;
+}
+
+export function latestNewDecompositionObservation(texts, knownKeys = new Set()) {
+  const seen = new Set();
+  const observations = [];
+  for (const text of texts || []) {
+    for (const observation of decompositionObservations(text)) {
+      if (seen.has(observation.key)) continue;
+      seen.add(observation.key);
+      observations.push(observation);
+    }
+  }
+  return observations.reverse().find((observation) => !knownKeys.has(observation.key)) || null;
 }
 
 export function latestNewDecompositionResponse(texts, knownKeys = new Set()) {
@@ -166,6 +244,91 @@ export function referenceAuditSubmissionDisposition(expectedPinIds, pendingPinId
   if (expected.length === pending.length
     && expected.every((pinId, index) => pinId === pending[index])) return "monitor";
   return "conflict";
+}
+
+const pendingChatStageStatuses = new Set(["armed", "submitted-observed", "submission-unconfirmed"]);
+const retryableChatStageStatuses = new Set(["not-attempted", "failed-confirmed", "rejected-confirmed"]);
+
+export function chatStageSubmissionDisposition(record, promptKey) {
+  if (!record) return "submit";
+  const samePrompt = String(record.promptKey || "") === String(promptKey || "");
+  if (samePrompt) return retryableChatStageStatuses.has(record.status) ? "submit" : "monitor";
+  return pendingChatStageStatuses.has(record.status) ? "conflict" : "submit";
+}
+
+export function chatStageMonitoringTimeout(record, configuredTimeout, now = Date.now()) {
+  const configured = Math.max(1_000, Number(configuredTimeout || 1_000));
+  const recoveryGrace = Math.min(30_000, configured);
+  const armedAt = Date.parse(record?.armedAt || record?.submittedAt || "");
+  if (!Number.isFinite(armedAt)) return configured;
+  return Math.max(recoveryGrace, Math.min(configured, configured - Math.max(0, Number(now) - armedAt)));
+}
+
+async function readChatStageState(stateFile) {
+  const state = await readJson(stateFile, { schemaVersion: 1, stages: {} });
+  state.schemaVersion ||= 1;
+  state.stages ||= {};
+  return state;
+}
+
+async function setChatStageStatus(stateFile, stageKey, values) {
+  const state = await readChatStageState(stateFile);
+  state.stages[stageKey] = {
+    ...(state.stages[stageKey] || {}),
+    ...values,
+    updatedAt: new Date().toISOString()
+  };
+  await writeJsonAtomic(stateFile, state);
+  return state.stages[stageKey];
+}
+
+async function submitChatStagePromptOnce({ page, stateFile, stageKey, promptKey, prompt, metadata = {} }) {
+  const state = await readChatStageState(stateFile);
+  const existing = state.stages[stageKey] || null;
+  const disposition = chatStageSubmissionDisposition(existing, promptKey);
+  if (disposition === "conflict") {
+    const error = new Error(`ChatGPT 阶段 ${stageKey} 仍有另一条未完成请求；禁止提交新提示词`);
+    error.code = "CHATGPT_STAGE_PENDING_CONFLICT";
+    throw error;
+  }
+  if (disposition === "monitor") return { submitted: false, record: existing };
+  const armed = await setChatStageStatus(stateFile, stageKey, {
+    promptKey,
+    status: "armed",
+    armedAt: new Date().toISOString(),
+    ...metadata
+  });
+  try {
+    await sendPrompt(page, prompt);
+    return {
+      submitted: true,
+      record: await setChatStageStatus(stateFile, stageKey, {
+        ...armed,
+        status: "submitted-observed",
+        submittedAt: new Date().toISOString(),
+        submissionError: null
+      })
+    };
+  } catch (error) {
+    if (error?.code === "CHATGPT_SUBMISSION_NOT_ATTEMPTED") {
+      await setChatStageStatus(stateFile, stageKey, {
+        ...armed,
+        status: "not-attempted",
+        submissionError: String(error?.message || error)
+      });
+      throw error;
+    }
+    // A click may have reached ChatGPT even when its UI acknowledgement did
+    // not. Keep the stage locked and immediately switch to passive recovery.
+    return {
+      submitted: true,
+      record: await setChatStageStatus(stateFile, stageKey, {
+        ...armed,
+        status: "submission-unconfirmed",
+        submissionError: String(error?.message || error)
+      })
+    };
+  }
 }
 
 async function composer(page) {
@@ -727,12 +890,12 @@ async function waitForAssistantText(page, previousCount, timeout) {
 
 const conversationApiCache = new WeakMap();
 
-async function conversationApiTextSnapshots(page) {
+async function conversationApiPayload(page) {
   const conversationId = page.url().match(/\/c\/([^/?#]+)/)?.[1];
-  if (!conversationId) return [];
+  if (!conversationId) return null;
   const now = Date.now();
   const cached = conversationApiCache.get(page);
-  if (cached && now - cached.at < 1_000) return cached.texts;
+  if (cached && now - cached.at < 1_000) return cached.payload;
   const payload = await page.evaluate(async (id) => {
     try {
       const response = await fetch(`/backend-api/conversation/${encodeURIComponent(id)}`, {
@@ -745,9 +908,16 @@ async function conversationApiTextSnapshots(page) {
       return null;
     }
   }, conversationId).catch(() => null);
-  const texts = conversationApiSnapshotTexts(payload);
-  conversationApiCache.set(page, { at: now, texts });
-  return texts;
+  conversationApiCache.set(page, { at: now, payload });
+  return payload;
+}
+
+async function conversationApiTextSnapshots(page) {
+  return conversationApiSnapshotTexts(await conversationApiPayload(page));
+}
+
+async function conversationApiImages(page) {
+  return conversationApiImageCandidates(await conversationApiPayload(page));
 }
 
 async function conversationTextSnapshots(page) {
@@ -778,8 +948,13 @@ async function waitForDecompositionResponse(page, knownKeys, timeout) {
   const started = Date.now();
   while (Date.now() - started < timeout) {
     if (page.isClosed()) throw new Error("ChatGPT 页面已关闭，无法继续等待语义分层结果");
-    const response = latestNewDecompositionResponse(await conversationTextSnapshots(page), knownKeys);
-    if (response) return response;
+    const observation = latestNewDecompositionObservation(await conversationTextSnapshots(page), knownKeys);
+    if (observation?.valid) return observation;
+    if (observation && !observation.valid) {
+      const error = new Error(`ChatGPT 已返回语义分层标记，但结果无效：${observation.error}`);
+      error.code = "CHATGPT_DECOMPOSITION_INVALID";
+      throw error;
+    }
     await page.waitForTimeout(500);
   }
   const error = new Error(`等待 ChatGPT 语义分层标记超时（${Math.round(timeout / 1000)} 秒）`);
@@ -1085,6 +1260,56 @@ async function visibleImageSources(page) {
     .filter(Boolean));
 }
 
+async function imageSourceSnapshot(page) {
+  const [visible, saved] = await Promise.all([
+    visibleImageSources(page),
+    conversationApiImages(page)
+  ]);
+  return [...new Set([...visible, ...saved.map((candidate) => candidate.key)])];
+}
+
+async function downloadConversationApiImage(page, candidate, file) {
+  const urls = candidate.url
+    ? [candidate.url]
+    : candidate.fileId
+      ? [
+          `/backend-api/files/${encodeURIComponent(candidate.fileId)}/download`,
+          `/backend-api/files/${encodeURIComponent(candidate.fileId)}`
+        ]
+      : [];
+  for (const url of urls) {
+    const downloaded = await page.evaluate(async (source) => {
+      try {
+        let response = await fetch(source, { credentials: "include", cache: "no-store" });
+        if (!response.ok) return null;
+        if (/json/i.test(response.headers.get("content-type") || "")) {
+          const payload = await response.json().catch(() => null);
+          const nextUrl = payload?.download_url || payload?.downloadUrl || payload?.url;
+          if (!nextUrl) return null;
+          response = await fetch(nextUrl, { credentials: "include", cache: "no-store" });
+          if (!response.ok) return null;
+        }
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        if (bytes.length < 5_000) return null;
+        let binary = "";
+        for (let offset = 0; offset < bytes.length; offset += 32_768) {
+          binary += String.fromCharCode(...bytes.subarray(offset, offset + 32_768));
+        }
+        return btoa(binary);
+      } catch {
+        return null;
+      }
+    }, url).catch(() => null);
+    if (!downloaded) continue;
+    const buffer = Buffer.from(downloaded, "base64");
+    const metadata = await sharp(buffer).metadata().catch(() => null);
+    if (!metadata?.width || !metadata?.height) continue;
+    await fs.writeFile(file, buffer);
+    return true;
+  }
+  return false;
+}
+
 async function waitForImageGenerationToSettle(page, timeout) {
   const stop = page.locator('[data-testid="stop-button"]');
   if (await stop.count()) {
@@ -1145,10 +1370,23 @@ async function saveLastAssistantImage(page, file, timeout, previousSources = [],
         error.code = "REFERENCE_ATTACHMENT_MISSING";
         throw error;
       }
+      if (/图片生成失败|无法完成这张图|image generation failed|unable to (complete|generate) (this|the) image/i.test(text)) {
+        const error = new Error("ChatGPT 明确报告图片生成失败");
+        error.code = "CHATGPT_IMAGE_GENERATION_FAILED";
+        throw error;
+      }
     }
-    const pageText = await page.locator("body").innerText().catch(() => "");
-    if (/图片生成失败|无法完成这张图|image generation failed|unable to (complete|generate) (this|the) image/i.test(pageText)) {
-      throw new Error("ChatGPT 网页报告图片生成失败");
+    const savedImages = await conversationApiImages(page);
+    const savedCandidate = [...savedImages].reverse().find((candidate) => !previous.has(candidate.key));
+    if (savedCandidate && await downloadConversationApiImage(page, savedCandidate, file)) {
+      if (await acceptDownloadedImage(
+        page,
+        file,
+        savedCandidate.key,
+        previous,
+        excludedFiles,
+        Math.max(1000, timeout - (Date.now() - started))
+      )) return;
     }
     const sources = await visibleImageSources(page);
     const src = [...sources].reverse().find((value) => !previous.has(value));
@@ -1449,6 +1687,7 @@ export async function decomposePreview(
   const layersFile = path.join(directionDir, "layers.json");
   const outputDir = path.join(directionDir, "layers");
   const reportFile = path.join(outputDir, "decomposition-report.json");
+  const chatStageStateFile = path.join(directionDir, "chatgpt-stage-state.json");
   const force = limits.force === true;
   const cached = force ? null : await readJson(layersFile);
   const cachedReport = force ? null : await readJson(reportFile);
@@ -1463,11 +1702,14 @@ export async function decomposePreview(
   let layers = cached?.schemaVersion >= 4 && cached?.layers?.length ? cached : null;
   let knownDecompositionKeys = null;
   const assetResults = new Map();
+  const previewStat = await fs.stat(previewFile);
+  const decompositionStageKey = "decomposition";
+  const decompositionPromptKey = `decomposition:${index}:${width}x${height}:${previewStat.size}:${Math.floor(previewStat.mtimeMs)}`;
 
   if (!layers) {
     const existingSnapshots = await decompositionTextSnapshots(page);
     const recovered = force ? null : latestNewDecompositionResponse(existingSnapshots, new Set());
-    knownDecompositionKeys = new Set(existingSnapshots.flatMap(decompositionJsonResponses).map((response) => response.key));
+    knownDecompositionKeys = new Set(existingSnapshots.flatMap(decompositionObservations).map((response) => response.key));
     if (recovered) {
       await fs.writeFile(path.join(directionDir, "decomposition-analysis.txt"), recovered.text, "utf8");
       layers = assignAssetIndices(recovered.payload, maxAssets);
@@ -1475,34 +1717,42 @@ export async function decomposePreview(
       layers = await runDecompositionAttempts({
         attempts,
         recover: async ({ attempt, lastError }) => recoverConversation({ attempt, lastError }),
-        operation: async ({ attempt, lastError }) => {
+        operation: async () => {
           const attemptStartedAt = Date.now();
-          let analysis = null;
-          if (attempt > 1 && lastError?.code !== "PREVIEW_ATTACHMENT_MISSING") {
-            analysis = await waitForDecompositionResponse(
-              page,
-              knownDecompositionKeys,
-              Math.min(10_000, remainingAttemptTimeout(attemptStartedAt, timeout))
-            ).catch((error) => {
-              if (error.code === "CHATGPT_DECOMPOSITION_TIMEOUT") return null;
-              throw error;
-            });
-            if (analysis) await onConversationReady();
-          }
-          if (!analysis) {
-            await sendPrompt(page, decompositionPrompt(index, width, height, maxAssets, type));
-            analysis = await waitForDecompositionResponse(
-              page,
-              knownDecompositionKeys,
-              remainingAttemptTimeout(attemptStartedAt, timeout)
-            );
-            await onConversationReady();
-          }
+          const submission = await submitChatStagePromptOnce({
+            page,
+            stateFile: chatStageStateFile,
+            stageKey: decompositionStageKey,
+            promptKey: decompositionPromptKey,
+            prompt: decompositionPrompt(index, width, height, maxAssets, type),
+            metadata: { previewSize: previewStat.size, previewMtimeMs: previewStat.mtimeMs }
+          });
+          const analysis = await waitForDecompositionResponse(
+            page,
+            knownDecompositionKeys,
+            Math.min(
+              remainingAttemptTimeout(attemptStartedAt, timeout),
+              chatStageMonitoringTimeout(submission.record, timeout)
+            )
+          );
+          await setChatStageStatus(chatStageStateFile, decompositionStageKey, {
+            promptKey: decompositionPromptKey,
+            status: "completed",
+            completedAt: new Date().toISOString()
+          });
+          await onConversationReady();
           const analysisFile = path.join(directionDir, "decomposition-analysis.txt");
           await fs.writeFile(analysisFile, analysis.text, "utf8");
           return assignAssetIndices(analysis.payload, maxAssets);
         },
         onFailure: async ({ attempt, error }) => {
+          if (error?.code === "CHATGPT_DECOMPOSITION_INVALID") {
+            await setChatStageStatus(chatStageStateFile, decompositionStageKey, {
+              promptKey: decompositionPromptKey,
+              status: "failed-confirmed",
+              failure: error.message
+            });
+          }
           console.error(`第 ${index} 套语义分层第 ${attempt}/${attempts} 次失败：${error.message}`);
           await screenshotFailure(page, path.join(directionDir, `decomposition-error-attempt-${attempt}.png`));
         }
@@ -1565,20 +1815,56 @@ export async function decomposePreview(
             const attemptStartedAt = Date.now();
             const candidateFile = path.join(outputDir, `.candidate-reconstructed-${layer.assetIndex + 1}.png`);
             await fs.rm(candidateFile, { force: true });
-            const previousSources = await visibleImageSources(page);
-            const assistantBaseline = await page.locator('[data-message-author-role="assistant"]').count();
-            const prompt = attempt === 1
-              ? reconstructedAssetPrompt(layer, embeddedLayers)
-              : `${reconstructedAssetPrompt(layer, embeddedLayers)}\n\n上一次结果未通过：${lastError?.assetResult?.reason || lastError?.message || "素材不完整"}。请扩大留白并确保只保留目标主体。`;
-            await sendPrompt(page, prompt);
-            await saveLastAssistantImage(
+            const hasConfirmedRejectedAsset = Boolean(lastError?.assetResult);
+            const prompt = hasConfirmedRejectedAsset
+              ? `${reconstructedAssetPrompt(layer, embeddedLayers)}\n\n上一次结果未通过：${lastError.assetResult.reason || lastError.message || "素材不完整"}。请扩大留白并确保只保留目标主体。`
+              : reconstructedAssetPrompt(layer, embeddedLayers);
+            const stageKey = `reconstruction:${layer.id}`;
+            const promptKey = `${stageKey}:${previewStat.size}:${Math.floor(previewStat.mtimeMs)}:${hasConfirmedRejectedAsset ? `correction-${attempt}` : "initial"}`;
+            const stageState = await readChatStageState(chatStageStateFile);
+            const stageRecord = stageState.stages[stageKey] || null;
+            const disposition = chatStageSubmissionDisposition(stageRecord, promptKey);
+            if (disposition === "conflict") {
+              const error = new Error(`透明素材 ${layer.id} 仍有未完成的 GPT 图片请求，禁止发送修正提示`);
+              error.code = "CHATGPT_STAGE_PENDING_CONFLICT";
+              throw error;
+            }
+            const previousSources = disposition === "monitor"
+              ? (stageRecord.previousSources || [])
+              : await imageSourceSnapshot(page);
+            const assistantBaseline = disposition === "monitor"
+              ? Number(stageRecord.assistantBaseline || 0)
+              : await page.locator('[data-message-author-role="assistant"]').count();
+            const submission = await submitChatStagePromptOnce({
               page,
-              candidateFile,
-              remainingAttemptTimeout(attemptStartedAt, assetTimeout),
-              previousSources,
-              [previewFile],
-              assistantBaseline
-            );
+              stateFile: chatStageStateFile,
+              stageKey,
+              promptKey,
+              prompt,
+              metadata: { previousSources, assistantBaseline, layerId: layer.id }
+            });
+            try {
+              await saveLastAssistantImage(
+                page,
+                candidateFile,
+                Math.min(
+                  remainingAttemptTimeout(attemptStartedAt, assetTimeout),
+                  chatStageMonitoringTimeout(submission.record, assetTimeout)
+                ),
+                previousSources,
+                [previewFile],
+                assistantBaseline
+              );
+            } catch (error) {
+              if (error?.code === "CHATGPT_IMAGE_GENERATION_FAILED") {
+                await setChatStageStatus(chatStageStateFile, stageKey, {
+                  promptKey,
+                  status: "failed-confirmed",
+                  failure: error.message
+                });
+              }
+              throw error;
+            }
             await onConversationReady();
             const candidateResult = await extractReconstructedAsset({
               candidateFile,
@@ -1588,6 +1874,12 @@ export async function decomposePreview(
             });
             if (candidateResult.status === "accepted") {
               await fs.rm(candidateFile, { force: true });
+              await setChatStageStatus(chatStageStateFile, stageKey, {
+                promptKey,
+                status: "completed",
+                completedAt: new Date().toISOString(),
+                outputFile: candidateResult.file
+              });
               return {
                 ...candidateResult,
                 sourceFallbackFile,
@@ -1598,6 +1890,13 @@ export async function decomposePreview(
             }
             const rejectedFile = path.join(outputDir, `rejected-reconstructed-${String(layer.assetIndex + 1).padStart(2, "0")}-attempt-${attempt}.png`);
             await fs.rename(candidateFile, rejectedFile).catch(() => {});
+            await setChatStageStatus(chatStageStateFile, stageKey, {
+              promptKey,
+              status: "rejected-confirmed",
+              rejectedAt: new Date().toISOString(),
+              rejectedFile,
+              rejectionReason: candidateResult.reason
+            });
             const rejected = new Error(candidateResult.reason);
             rejected.assetResult = { ...candidateResult, rejectedFile };
             throw rejected;
@@ -1787,6 +2086,10 @@ export async function generateDirections({
     let attachmentReceipt = await readJson(attachmentReceiptFile);
     const size = type === "popup" ? { width: 1002, height: 1335 } : type === "banner" ? { width: 1140, height: 240 } : { width: 240, height: 240 };
     const previewFile = path.join(directionDir, "preview.png");
+    const chatStageStateFile = path.join(directionDir, "chatgpt-stage-state.json");
+    const referenceStat = await fs.stat(referenceFiles[0]);
+    const generationStageKey = "generation";
+    const generationPromptKey = `generation:${index}:${type}:${path.basename(referenceFiles[0])}:${referenceStat.size}:${Math.floor(referenceStat.mtimeMs)}`;
     let lastError;
     let chatOpened = false;
     const savedDirectionChat = () => manifest.directionChats[String(index)]?.url
@@ -1857,7 +2160,26 @@ export async function generateDirections({
           operation: async () => {
             const attemptStartedAt = Date.now();
             await ensureDirectionChat();
-            if (generationReferenceUploadRequired(attachmentReceipt, referenceFiles, referenceAvailableInConversation)) {
+            let stageState = await readChatStageState(chatStageStateFile);
+            let stageRecord = stageState.stages[generationStageKey] || null;
+            if (!stageRecord && attachmentReceipt?.generationSubmittedAt && referenceAvailableInConversation) {
+              stageRecord = await setChatStageStatus(chatStageStateFile, generationStageKey, {
+                promptKey: generationPromptKey,
+                status: "submitted-observed",
+                armedAt: attachmentReceipt.generationSubmittedAt,
+                submittedAt: attachmentReceipt.generationSubmittedAt,
+                previousSources: attachmentReceipt.previousSources || [],
+                assistantBaseline: Number(attachmentReceipt.assistantBaseline || 0),
+                migratedFromAttachmentReceipt: true
+              });
+            }
+            const disposition = chatStageSubmissionDisposition(stageRecord, generationPromptKey);
+            if (disposition === "conflict") {
+              const error = new Error(`第 ${index} 套已有另一条未完成生图请求，禁止再次发送`);
+              error.code = "CHATGPT_STAGE_PENDING_CONFLICT";
+              throw error;
+            }
+            if (disposition === "submit" && generationReferenceUploadRequired(attachmentReceipt, referenceFiles, referenceAvailableInConversation)) {
               const attachment = await attachFiles(page, referenceFiles);
               attachmentReceipt = {
                 files: attachment.expectedNames,
@@ -1867,25 +2189,59 @@ export async function generateDirections({
               };
               await writeJsonAtomic(attachmentReceiptFile, attachmentReceipt);
             }
-            const previewImageSources = await visibleImageSources(page);
-            const assistantBaseline = await page.locator('[data-message-author-role="assistant"]').count();
-            await sendPrompt(page, directGenerationPrompt(index, type, size.width, size.height));
+            const previewImageSources = disposition === "monitor"
+              ? (stageRecord.previousSources || [])
+              : await imageSourceSnapshot(page);
+            const assistantBaseline = disposition === "monitor"
+              ? Number(stageRecord.assistantBaseline || 0)
+              : await page.locator('[data-message-author-role="assistant"]').count();
+            const submission = await submitChatStagePromptOnce({
+              page,
+              stateFile: chatStageStateFile,
+              stageKey: generationStageKey,
+              promptKey: generationPromptKey,
+              prompt: directGenerationPrompt(index, type, size.width, size.height),
+              metadata: { previousSources: previewImageSources, assistantBaseline }
+            });
             referenceAvailableInConversation = true;
             attachmentReceipt = {
               ...attachmentReceipt,
               files: attachmentReceipt?.files || referenceFiles.map((file) => path.basename(file)),
-              generationSubmittedAt: new Date().toISOString(),
+              generationSubmittedAt: submission.record.submittedAt || submission.record.armedAt || new Date().toISOString(),
+              generationSubmissionStatus: submission.record.status,
+              previousSources: previewImageSources,
+              assistantBaseline,
               chatUrl: conversationUrl(page.url()) || savedDirectionChat() || null
             };
             await writeJsonAtomic(attachmentReceiptFile, attachmentReceipt);
-            await saveLastAssistantImage(
-              page,
-              previewFile,
-              remainingAttemptTimeout(attemptStartedAt, minuteTimeout(config.generation.imageTimeoutMinutes)),
-              previewImageSources,
-              referenceFiles,
-              assistantBaseline
-            );
+            try {
+              await saveLastAssistantImage(
+                page,
+                previewFile,
+                Math.min(
+                  remainingAttemptTimeout(attemptStartedAt, minuteTimeout(config.generation.imageTimeoutMinutes)),
+                  chatStageMonitoringTimeout(submission.record, minuteTimeout(config.generation.imageTimeoutMinutes))
+                ),
+                previewImageSources,
+                referenceFiles,
+                assistantBaseline
+              );
+            } catch (error) {
+              if (error?.code === "REFERENCE_ATTACHMENT_MISSING" || error?.code === "CHATGPT_IMAGE_GENERATION_FAILED") {
+                await setChatStageStatus(chatStageStateFile, generationStageKey, {
+                  promptKey: generationPromptKey,
+                  status: "failed-confirmed",
+                  failure: error.message
+                });
+              }
+              throw error;
+            }
+            await setChatStageStatus(chatStageStateFile, generationStageKey, {
+              promptKey: generationPromptKey,
+              status: "completed",
+              completedAt: new Date().toISOString(),
+              outputFile: previewFile
+            });
             await rememberConversation();
           },
           onFailure: async ({ attempt, error }) => {
@@ -1897,7 +2253,6 @@ export async function generateDirections({
             if (chatOpened) await rememberConversation().catch(() => {});
             console.error(`第 ${index} 套预览生成第 ${attempt}/${previewAttempts} 次失败：${error.message}`);
             await screenshotFailure(page, path.join(directionDir, `error-attempt-${attempt}.png`));
-            await stopActiveResponse(page).catch(() => false);
             chatOpened = false;
           }
         });
@@ -1960,7 +2315,6 @@ export async function generateDirections({
       recordDirectionFailure(manifest, failure);
       await writeJsonAtomic(manifestFile, manifest);
       console.error(`第 ${index} 套连续 ${failure.attempts} 次失败，已记录并继续下一套：${failure.message}`);
-      await stopActiveResponse(page).catch(() => false);
     }
   }
 
