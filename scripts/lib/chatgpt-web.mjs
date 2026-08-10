@@ -684,6 +684,26 @@ async function sendPrompt(page, prompt) {
 
   await box.press("Enter");
   if (await waitForPromptSubmission(page, box, before)) return;
+  for (const candidate of candidates) {
+    const count = await candidate.count();
+    for (let index = 0; index < count; index += 1) {
+      const button = candidate.nth(index);
+      if (!await button.isVisible().catch(() => false)) continue;
+      const clicked = await button.evaluate((element) => {
+        if (element.disabled || element.getAttribute("aria-disabled") === "true") return false;
+        element.focus();
+        element.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
+        element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
+        element.click();
+        return true;
+      }).catch(() => false);
+      if (clicked && await waitForPromptSubmission(page, box, before)) return;
+    }
+  }
+  await box.press("Meta+Enter").catch(() => {});
+  if (await waitForPromptSubmission(page, box, before)) return;
+  await box.press("Control+Enter").catch(() => {});
+  if (await waitForPromptSubmission(page, box, before)) return;
   throw new Error("ChatGPT 提示词已填写但未能提交");
 }
 
