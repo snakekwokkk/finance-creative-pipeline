@@ -985,6 +985,7 @@ export async function reviewReferenceCandidates({ page, project, config, runDir,
     response = await waitForReferenceAuditResponse(page, candidates, timeout, knownKeys);
   }
   const audit = response.audit || parseReferenceAudit(response.text, candidates);
+  await stopActiveResponse(page).catch(() => false);
   const url = conversationUrl(page.url());
   if (!url) throw new Error("参考图视觉审核完成后未获得有效聊天 URL");
   let titleVerified = saved?.titleVerified === true;

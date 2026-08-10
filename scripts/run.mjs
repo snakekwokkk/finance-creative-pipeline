@@ -92,6 +92,7 @@ try {
 
 const launchBrowserOnce = createSingleLaunchBrowser(launchPersistentBrowser);
 let context;
+let chatgpt;
 let stopSignal = null;
 const requestStop = (signal) => {
   if (stopSignal) return;
@@ -111,7 +112,7 @@ try {
   const sourceHome = "https://huaban.com/discovery";
   const sourcePrefix = "https://huaban.com";
   const sourcePage = await findOrOpenPage(context, sourcePrefix, sourceHome);
-  const chatgpt = await findOrOpenPage(context, "https://chatgpt.com", "https://chatgpt.com/");
+  chatgpt = await findOrOpenPage(context, "https://chatgpt.com", "https://chatgpt.com/");
   const sourceDetail = await context.newPage();
   const browserSession = {
     pid: process.pid,
@@ -257,7 +258,10 @@ try {
     console.log(JSON.stringify({ status: "stopped", signal: stopSignal, runDir, readyCount, failures }));
     process.exitCode = stopSignal === "SIGTERM" ? 143 : 130;
   } else {
-    if (context?.pages()?.length) await screenshotFailure(context.pages()[0], path.join(runDir, "fatal-error.png"));
+    const failurePage = chatgpt && !chatgpt.isClosed()
+      ? chatgpt
+      : context?.pages()?.find((page) => page.url().startsWith("https://chatgpt.com")) || context?.pages()?.[0];
+    if (failurePage) await screenshotFailure(failurePage, path.join(runDir, "fatal-error.png"));
     await appendError(runFile, "local_pipeline", error);
     await notify("金融运营素材流水线需要处理", error.message);
     console.error(error.stack || error.message);

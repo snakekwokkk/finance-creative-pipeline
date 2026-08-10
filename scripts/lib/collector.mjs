@@ -856,9 +856,9 @@ export async function collectReferences({
             attempts: visualReviewMaxAttempts
           });
         } catch (error) {
-          if (referenceCollectionRequiresUserAction(error)) throw error;
           reviewQueue.unshift(...batch);
           await persistReviewQueue();
+          if (referenceCollectionRequiresUserAction(error)) throw error;
           console.warn(`${plan.type} 候选批次内容审核失败，已保留该批供下次恢复：${error.message}`);
           return false;
         }
