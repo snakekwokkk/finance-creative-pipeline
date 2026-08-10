@@ -12,6 +12,7 @@ import {
   chatGptSessionAuthenticated,
   clearDirectionFailure,
   conversationUrl,
+  conversationApiSnapshotTexts,
   dailyProjectName,
   decompositionAttemptLimit,
   decompositionAttemptsExhausted,
@@ -285,6 +286,22 @@ REFERENCE_AUDIT_END`;
     latestNewReferenceAuditObservation([incompleteBatch], candidates, new Set([observations[0].key])),
     null
   );
+});
+
+test("reference audit listener reads assistant markers from saved conversation data", () => {
+  const texts = conversationApiSnapshotTexts({
+    mapping: {
+      user: { message: { author: { role: "user" }, create_time: 1, content: { parts: ["prompt"] } } },
+      assistant: {
+        message: {
+          author: { role: "assistant" },
+          create_time: 2,
+          content: { parts: ["REFERENCE_AUDIT_START\n{\"candidates\":[]}\nREFERENCE_AUDIT_END"] }
+        }
+      }
+    }
+  });
+  assert.deepEqual(texts, ["REFERENCE_AUDIT_START\n{\"candidates\":[]}\nREFERENCE_AUDIT_END"]);
 });
 
 test("direct popup generation internally analyzes one attachment and outputs only an image", () => {

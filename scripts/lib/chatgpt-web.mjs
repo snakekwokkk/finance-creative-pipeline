@@ -57,6 +57,18 @@ function markedJsonBlocks(text, start, end) {
   return blocks;
 }
 
+export function conversationApiSnapshotTexts(payload) {
+  const messages = Object.values(payload?.mapping || {})
+    .map((node) => node?.message)
+    .filter((message) => message?.author?.role === "assistant")
+    .sort((left, right) => Number(left?.create_time || 0) - Number(right?.create_time || 0));
+  return messages.map((message) => (message?.content?.parts || [])
+    .map((part) => typeof part === "string" ? part : String(part?.text || ""))
+    .filter(Boolean)
+    .join("\n"))
+    .filter(Boolean);
+}
+
 export function decompositionJsonResponses(text) {
   const responses = [];
   for (const block of markedJsonBlocks(text, "DECOMPOSE_START", "DECOMPOSE_END")) {
@@ -704,6 +716,31 @@ async function waitForAssistantText(page, previousCount, timeout) {
   throw error;
 }
 
+const conversationApiCache = new WeakMap();
+
+async function conversationApiTextSnapshots(page) {
+  const conversationId = page.url().match(/\/c\/([^/?#]+)/)?.[1];
+  if (!conversationId) return [];
+  const now = Date.now();
+  const cached = conversationApiCache.get(page);
+  if (cached && now - cached.at < 1_000) return cached.texts;
+  const payload = await page.evaluate(async (id) => {
+    try {
+      const response = await fetch(`/backend-api/conversation/${encodeURIComponent(id)}`, {
+        credentials: "include",
+        cache: "no-store"
+      });
+      if (!response.ok) return null;
+      return response.json();
+    } catch {
+      return null;
+    }
+  }, conversationId).catch(() => null);
+  const texts = conversationApiSnapshotTexts(payload);
+  conversationApiCache.set(page, { at: now, texts });
+  return texts;
+}
+
 async function conversationTextSnapshots(page) {
   const snapshots = [];
   const selectors = [
@@ -724,6 +761,7 @@ async function conversationTextSnapshots(page) {
     page.locator("body").textContent().catch(() => "")
   ]);
   snapshots.push(bodyInnerText, bodyTextContent || "");
+  snapshots.push(...await conversationApiTextSnapshots(page));
   return snapshots;
 }
 
@@ -925,19 +963,25 @@ export async function reviewReferenceCandidates({ page, project, config, runDir,
   const knownKeys = new Set(initialSnapshots.flatMap((text) => referenceAuditObservations(text, candidates).map((item) => item.key)));
   let response = latestReferenceAuditResponse(initialSnapshots, candidates);
   if (!response) {
-    await sendPrompt(page, referenceAuditPrompt(type, candidates));
-    const submittedUrl = conversationUrl(page.url());
-    if (!submittedUrl) throw new Error("参考图直链审核提交后未获得有效聊天 URL");
-    state.chats[chatKey] = {
-      url: submittedUrl,
-      title,
-      titleVerified: saved.titleVerified === true,
-      projectUrl: project.url,
-      updatedAt: new Date().toISOString(),
-      pendingPinIds: candidates.map((item) => String(item.pinId)),
-      pendingCandidates: persistedAuditCandidates(candidates)
-    };
-    await writeJsonAtomic(stateFile, state);
+    const expectedPinIds = candidates.map((item) => String(item.pinId));
+    const pendingPinIds = (state.chats?.[chatKey]?.pendingPinIds || []).map(String);
+    const pendingMatches = expectedPinIds.length === pendingPinIds.length
+      && expectedPinIds.every((pinId, index) => pinId === pendingPinIds[index]);
+    if (!pendingMatches) {
+      await sendPrompt(page, referenceAuditPrompt(type, candidates));
+      const submittedUrl = conversationUrl(page.url());
+      if (!submittedUrl) throw new Error("参考图直链审核提交后未获得有效聊天 URL");
+      state.chats[chatKey] = {
+        url: submittedUrl,
+        title,
+        titleVerified: saved.titleVerified === true,
+        projectUrl: project.url,
+        updatedAt: new Date().toISOString(),
+        pendingPinIds: expectedPinIds,
+        pendingCandidates: persistedAuditCandidates(candidates)
+      };
+      await writeJsonAtomic(stateFile, state);
+    }
     response = await waitForReferenceAuditResponse(page, candidates, timeout, knownKeys);
   }
   const audit = response.audit || parseReferenceAudit(response.text, candidates);
