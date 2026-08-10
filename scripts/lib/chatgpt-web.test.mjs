@@ -31,6 +31,7 @@ import {
   referenceAuditChatTitle,
   referenceAuditChatBootstrapPrompt,
   referenceAuditPrompt,
+  referenceAuditSubmissionDisposition,
   reconstructedAssetPrompt,
   recordDirectionFailure,
   rejectedReferenceSourceSet,
@@ -250,6 +251,14 @@ REFERENCE_AUDIT_END`;
   assert.ok(response);
   assert.equal(response.audit.candidates[0].accepted, true);
   assert.equal(response.audit.candidates[1].accepted, false);
+});
+
+test("reference audit batches are submit-once and become passive monitors after arming", () => {
+  const current = ["p1", "p2", "p3", "p4", "p5"];
+  assert.equal(referenceAuditSubmissionDisposition(current, []), "submit");
+  assert.equal(referenceAuditSubmissionDisposition(current, current), "monitor");
+  assert.equal(referenceAuditSubmissionDisposition(current, ["p1", "p2"]), "conflict");
+  assert.equal(referenceAuditSubmissionDisposition(current, ["old1", "old2", "old3", "old4", "old5"]), "conflict");
 });
 
 test("reference audit recovery ignores incomplete JSON and selects the newest valid result", () => {

@@ -159,6 +159,15 @@ export function latestReferenceAuditResponse(texts, candidates) {
   return responses.at(-1) || null;
 }
 
+export function referenceAuditSubmissionDisposition(expectedPinIds, pendingPinIds) {
+  const expected = (expectedPinIds || []).map(String);
+  const pending = (pendingPinIds || []).map(String);
+  if (!pending.length) return "submit";
+  if (expected.length === pending.length
+    && expected.every((pinId, index) => pinId === pending[index])) return "monitor";
+  return "conflict";
+}
+
 async function composer(page) {
   const candidates = [
     page.locator("#prompt-textarea"),
@@ -660,13 +669,11 @@ async function sendPrompt(page, prompt) {
     page.getByRole("button", { name: /发送|Send message|Send/i })
   ];
 
-  // Project-home composers occasionally ignore a normal button click even
-  // though the arrow is enabled. Enter reliably creates the project chat.
-  if (!conversationUrl(before.url)) {
-    await box.press("Enter");
-    if (await waitForPromptSubmission(page, box, before)) return;
-  }
-
+  // A prompt may have been accepted even while ChatGPT's client has not yet
+  // cleared the composer or rendered the new turn. Never fire a second submit
+  // action in that ambiguous window: doing so can create duplicate turns and
+  // consume the user's ChatGPT quota. Find one enabled control, click it once,
+  // and let the caller persist/recover an unconfirmed submission passively.
   const started = Date.now();
   while (Date.now() - started < 30_000) {
     for (const candidate of candidates) {
@@ -675,36 +682,18 @@ async function sendPrompt(page, prompt) {
         const button = candidate.nth(index);
         if (await button.isVisible().catch(() => false) && await button.isEnabled().catch(() => false)) {
           await button.click({ force: true });
-          if (await waitForPromptSubmission(page, box, before)) return;
+          if (await waitForPromptSubmission(page, box, before, 15_000)) return;
+          const error = new Error("ChatGPT 提交动作已执行一次，但页面未确认；已锁定本批次并停止，禁止自动重发");
+          error.code = "CHATGPT_SUBMISSION_UNCONFIRMED";
+          throw error;
         }
       }
     }
     await page.waitForTimeout(1000);
   }
-
-  await box.press("Enter");
-  if (await waitForPromptSubmission(page, box, before)) return;
-  for (const candidate of candidates) {
-    const count = await candidate.count();
-    for (let index = 0; index < count; index += 1) {
-      const button = candidate.nth(index);
-      if (!await button.isVisible().catch(() => false)) continue;
-      const clicked = await button.evaluate((element) => {
-        if (element.disabled || element.getAttribute("aria-disabled") === "true") return false;
-        element.focus();
-        element.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
-        element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
-        element.click();
-        return true;
-      }).catch(() => false);
-      if (clicked && await waitForPromptSubmission(page, box, before)) return;
-    }
-  }
-  await box.press("Meta+Enter").catch(() => {});
-  if (await waitForPromptSubmission(page, box, before)) return;
-  await box.press("Control+Enter").catch(() => {});
-  if (await waitForPromptSubmission(page, box, before)) return;
-  throw new Error("ChatGPT 提示词已填写但未能提交");
+  const error = new Error("未找到可用的 ChatGPT 发送按钮，未执行提交动作");
+  error.code = "CHATGPT_SUBMISSION_NOT_ATTEMPTED";
+  throw error;
 }
 
 async function validImageFile(file) {
@@ -985,10 +974,45 @@ export async function reviewReferenceCandidates({ page, project, config, runDir,
   if (!response) {
     const expectedPinIds = candidates.map((item) => String(item.pinId));
     const pendingPinIds = (state.chats?.[chatKey]?.pendingPinIds || []).map(String);
-    const pendingMatches = expectedPinIds.length === pendingPinIds.length
-      && expectedPinIds.every((pinId, index) => pinId === pendingPinIds[index]);
-    if (!pendingMatches) {
-      await sendPrompt(page, referenceAuditPrompt(type, candidates));
+    const submissionDisposition = referenceAuditSubmissionDisposition(expectedPinIds, pendingPinIds);
+    if (submissionDisposition === "conflict") {
+      const error = new Error(`${title} 仍有未完成审核批次 ${pendingPinIds.join("、")}；为防止重复或串批，禁止提交新批次`);
+      error.code = "CHATGPT_REFERENCE_AUDIT_PENDING_CONFLICT";
+      throw error;
+    }
+    if (submissionDisposition === "submit") {
+      // Arm and persist the idempotency lock before touching ChatGPT. If the
+      // browser accepts the click but the UI acknowledgement is delayed, a
+      // restart can only monitor this batch; it can never submit it again.
+      state.chats[chatKey] = {
+        url: saved.url,
+        title,
+        titleVerified: saved.titleVerified === true,
+        projectUrl: project.url,
+        updatedAt: new Date().toISOString(),
+        pendingPinIds: expectedPinIds,
+        pendingCandidates: persistedAuditCandidates(candidates),
+        submissionStatus: "armed"
+      };
+      await writeJsonAtomic(stateFile, state);
+      try {
+        await sendPrompt(page, referenceAuditPrompt(type, candidates));
+      } catch (error) {
+        state.chats[chatKey] = {
+          ...state.chats[chatKey],
+          updatedAt: new Date().toISOString(),
+          submissionStatus: error?.code === "CHATGPT_SUBMISSION_NOT_ATTEMPTED"
+            ? "not-attempted"
+            : "submission-unconfirmed",
+          submissionError: String(error?.message || error)
+        };
+        if (error?.code === "CHATGPT_SUBMISSION_NOT_ATTEMPTED") {
+          state.chats[chatKey].pendingPinIds = [];
+          state.chats[chatKey].pendingCandidates = [];
+        }
+        await writeJsonAtomic(stateFile, state);
+        throw error;
+      }
       const submittedUrl = conversationUrl(page.url());
       if (!submittedUrl) throw new Error("参考图直链审核提交后未获得有效聊天 URL");
       state.chats[chatKey] = {
@@ -998,7 +1022,8 @@ export async function reviewReferenceCandidates({ page, project, config, runDir,
         projectUrl: project.url,
         updatedAt: new Date().toISOString(),
         pendingPinIds: expectedPinIds,
-        pendingCandidates: persistedAuditCandidates(candidates)
+        pendingCandidates: persistedAuditCandidates(candidates),
+        submissionStatus: "submitted-observed"
       };
       await writeJsonAtomic(stateFile, state);
     }
