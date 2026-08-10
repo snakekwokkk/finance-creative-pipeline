@@ -37,6 +37,8 @@ import {
   generationReferenceUploadRequired,
   latestNewDecompositionResponse,
   latestReferenceAuditResponse,
+  latestNewReferenceAuditObservation,
+  referenceAuditObservations,
   referenceAuditJsonResponses,
   requiresUserAction,
   rasterNeedsReconstruction,
@@ -263,6 +265,25 @@ REFERENCE_AUDIT_END`;
   assert.equal(
     latestReferenceAuditResponse([`${first}\n${incomplete}\n${second}`], candidates)?.audit.candidates[0].score,
     92
+  );
+});
+
+test("reference audit listener surfaces a completed invalid response immediately", () => {
+  const candidates = [
+    { pinId: "p1", imageUrl: "https://img.example/p1.webp" },
+    { pinId: "p2", imageUrl: "https://img.example/p2.webp" }
+  ];
+  const incompleteBatch = `REFERENCE_AUDIT_START
+{"candidates":[{"pinId":"p1","imageAccessible":true,"typeMatch":true,"completeDesign":true,"financeRelevant":true}]}
+REFERENCE_AUDIT_END`;
+  const observations = referenceAuditObservations(incompleteBatch, candidates);
+  assert.equal(observations.length, 1);
+  assert.equal(observations[0].valid, false);
+  assert.match(observations[0].error, /漏掉候选/);
+  assert.equal(latestNewReferenceAuditObservation([incompleteBatch], candidates)?.valid, false);
+  assert.equal(
+    latestNewReferenceAuditObservation([incompleteBatch], candidates, new Set([observations[0].key])),
+    null
   );
 });
 

@@ -827,13 +827,26 @@ export async function collectReferences({
       let queryCursor = 0;
       let emptyQueries = 0;
       const reviewQueue = [];
+      const auditStateFile = path.join(runDir, "reference-audit-chats.json");
+      const auditState = await readJson(auditStateFile, { schemaVersion: 1, chats: {}, batches: [], queuedCandidates: {} });
+      auditState.queuedCandidates ||= {};
 
-      const flushReviewQueue = async () => {
+      const persistReviewQueue = async () => {
+        const latestAuditState = await readJson(auditStateFile, { schemaVersion: 1, chats: {}, batches: [], queuedCandidates: {} });
+        latestAuditState.queuedCandidates ||= {};
+        latestAuditState.queuedCandidates[plan.type] = reviewQueue;
+        await writeJsonAtomic(auditStateFile, latestAuditState);
+      };
+
+      const flushReviewQueue = async ({ allowPartialRecovery = false } = {}) => {
         if (!reviewQueue.length || acceptedForType >= plan.count) {
           reviewQueue.length = 0;
-          return;
+          await persistReviewQueue();
+          return false;
         }
+        if (!allowPartialRecovery && reviewQueue.length < visualReviewBatchSize) return false;
         const batch = reviewQueue.splice(0, visualReviewBatchSize);
+        await persistReviewQueue();
         let reviewed;
         try {
           reviewed = await reviewCandidateBatch({
@@ -844,8 +857,10 @@ export async function collectReferences({
           });
         } catch (error) {
           if (referenceCollectionRequiresUserAction(error)) throw error;
-          console.warn(`${plan.type} 候选批次内容审核失败，已跳过该批并继续：${error.message}`);
-          return;
+          reviewQueue.unshift(...batch);
+          await persistReviewQueue();
+          console.warn(`${plan.type} 候选批次内容审核失败，已保留该批供下次恢复：${error.message}`);
+          return false;
         }
         reviewed.sort((left, right) => Number(right.audit.score || 0) - Number(left.audit.score || 0));
         for (const { candidate, audit } of reviewed) {
@@ -965,9 +980,10 @@ export async function collectReferences({
             });
           }
         }
+        await persistReviewQueue();
+        return true;
       };
 
-      const auditState = await readJson(path.join(runDir, "reference-audit-chats.json"), { chats: {} });
       const pendingCandidates = Array.isArray(auditState.chats?.[plan.type]?.pendingCandidates)
         ? auditState.chats[plan.type].pendingCandidates
         : [];
@@ -978,8 +994,19 @@ export async function collectReferences({
       }
       if (reviewQueue.length) {
         scannedCandidates += reviewQueue.length;
-        await flushReviewQueue();
+        await flushReviewQueue({ allowPartialRecovery: true });
       }
+      const queuedCandidates = Array.isArray(auditState.queuedCandidates?.[plan.type])
+        ? auditState.queuedCandidates[plan.type]
+        : [];
+      for (const candidate of queuedCandidates) {
+        if (!candidate?.pinId || !candidate?.imageUrl || candidate.referenceType !== plan.type) continue;
+        if (attemptedPinIds.has(String(candidate.pinId))) continue;
+        reviewQueue.push(candidate);
+        attemptedPinIds.add(String(candidate.pinId));
+      }
+      if (reviewQueue.length) scannedCandidates += reviewQueue.length;
+      if (reviewQueue.length >= visualReviewBatchSize) await flushReviewQueue();
 
       while (acceptedForType < plan.count
         && scannedCandidates < budgets.scanned
@@ -1044,6 +1071,7 @@ export async function collectReferences({
               searchKeyword: query,
               titleAudit
             });
+            await persistReviewQueue();
             if (reviewQueue.length >= visualReviewBatchSize) await flushReviewQueue();
           } catch (error) {
             if (referenceCollectionRequiresUserAction(error)) throw error;
@@ -1062,7 +1090,10 @@ export async function collectReferences({
           }
         }
       }
-      await flushReviewQueue();
+      await persistReviewQueue();
+      if (reviewQueue.length) {
+        console.warn(`${plan.type} 尚有 ${reviewQueue.length}/${visualReviewBatchSize} 个候选，未提交不足 5 条的审核批次，已保存供下次补齐`);
+      }
       if (acceptedForType < plan.count) {
         console.warn(`${plan.type} 参考图仅采集到 ${acceptedForType}/${plan.count}；已扫描 ${scannedCandidates}/${budgets.scanned} 个候选，审核通过后下载验证 ${downloadedCandidates}/${budgets.downloaded} 张，跳过缺失方向并继续`);
       }

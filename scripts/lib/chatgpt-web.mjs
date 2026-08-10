@@ -103,6 +103,37 @@ export function referenceAuditJsonResponses(text, candidates) {
   return responses;
 }
 
+export function referenceAuditObservations(text, candidates) {
+  const expectedIds = new Set((candidates || []).map((item) => String(item.pinId)));
+  const observations = [];
+  for (const block of markedJsonBlocks(text, "REFERENCE_AUDIT_START", "REFERENCE_AUDIT_END")) {
+    const mentionsExpectedCandidate = [...expectedIds].some((pinId) => block.json.includes(pinId));
+    if (!mentionsExpectedCandidate) continue;
+    const key = block.json.trim();
+    try {
+      const payload = JSON.parse(key);
+      const audit = parseReferenceAudit(block.text, candidates);
+      observations.push({ text: block.text, payload, audit, key, valid: true });
+    } catch (error) {
+      observations.push({ text: block.text, payload: null, audit: null, key, valid: false, error: error.message });
+    }
+  }
+  return observations;
+}
+
+export function latestNewReferenceAuditObservation(texts, candidates, knownKeys = new Set()) {
+  const seen = new Set();
+  const observations = [];
+  for (const text of texts || []) {
+    for (const observation of referenceAuditObservations(text, candidates)) {
+      if (seen.has(observation.key)) continue;
+      seen.add(observation.key);
+      observations.push(observation);
+    }
+  }
+  return observations.reverse().find((observation) => !knownKeys.has(observation.key)) || null;
+}
+
 export function latestReferenceAuditResponse(texts, candidates) {
   const seen = new Set();
   const responses = [];
@@ -681,10 +712,18 @@ async function conversationTextSnapshots(page) {
     "main article"
   ];
   for (const selector of selectors) {
-    const texts = await page.locator(selector).allInnerTexts().catch(() => []);
-    snapshots.push(...texts);
+    const locator = page.locator(selector);
+    const [innerTexts, textContents] = await Promise.all([
+      locator.allInnerTexts().catch(() => []),
+      locator.allTextContents().catch(() => [])
+    ]);
+    snapshots.push(...innerTexts, ...textContents);
   }
-  snapshots.push(await page.locator("body").innerText().catch(() => ""));
+  const [bodyInnerText, bodyTextContent] = await Promise.all([
+    page.locator("body").innerText().catch(() => ""),
+    page.locator("body").textContent().catch(() => "")
+  ]);
+  snapshots.push(bodyInnerText, bodyTextContent || "");
   return snapshots;
 }
 
@@ -708,13 +747,29 @@ async function currentReferenceAuditResponse(page, candidates) {
   );
 }
 
-async function waitForReferenceAuditResponse(page, candidates, timeout) {
+async function waitForReferenceAuditResponse(page, candidates, timeout, knownKeys = new Set()) {
   const started = Date.now();
   while (Date.now() - started < timeout) {
     if (page.isClosed()) throw new Error("ChatGPT 页面已关闭，无法继续等待参考图内容审核结果");
-    const response = await currentReferenceAuditResponse(page, candidates);
-    if (response) return response;
-    await page.waitForTimeout(500);
+    const observation = latestNewReferenceAuditObservation(await conversationTextSnapshots(page), candidates, knownKeys);
+    if (observation?.valid) return observation;
+    if (observation && !observation.valid) {
+      const error = new Error(`ChatGPT 已返回参考图审核标记，但结果无效：${observation.error}`);
+      error.code = "CHATGPT_REFERENCE_AUDIT_INVALID";
+      throw error;
+    }
+    await page.waitForTimeout(250);
+  }
+  const graceStarted = Date.now();
+  while (Date.now() - graceStarted < 5_000) {
+    const observation = latestNewReferenceAuditObservation(await conversationTextSnapshots(page), candidates, knownKeys);
+    if (observation?.valid) return observation;
+    if (observation && !observation.valid) {
+      const error = new Error(`ChatGPT 已返回参考图审核标记，但结果无效：${observation.error}`);
+      error.code = "CHATGPT_REFERENCE_AUDIT_INVALID";
+      throw error;
+    }
+    await page.waitForTimeout(250);
   }
   const error = new Error(`等待 ChatGPT 参考图内容审核标记超时（${Math.round(timeout / 1000)} 秒）`);
   error.code = "CHATGPT_REFERENCE_AUDIT_TIMEOUT";
@@ -866,7 +921,9 @@ export async function reviewReferenceCandidates({ page, project, config, runDir,
   }
   await openDirectionChat(page, project, saved.url);
   const timeout = minuteTimeout(config?.collection?.visualReviewTimeoutMinutes || 4);
-  let response = await currentReferenceAuditResponse(page, candidates);
+  const initialSnapshots = await conversationTextSnapshots(page);
+  const knownKeys = new Set(initialSnapshots.flatMap((text) => referenceAuditObservations(text, candidates).map((item) => item.key)));
+  let response = latestReferenceAuditResponse(initialSnapshots, candidates);
   if (!response) {
     await sendPrompt(page, referenceAuditPrompt(type, candidates));
     const submittedUrl = conversationUrl(page.url());
@@ -881,7 +938,7 @@ export async function reviewReferenceCandidates({ page, project, config, runDir,
       pendingCandidates: persistedAuditCandidates(candidates)
     };
     await writeJsonAtomic(stateFile, state);
-    response = await waitForReferenceAuditResponse(page, candidates, timeout);
+    response = await waitForReferenceAuditResponse(page, candidates, timeout, knownKeys);
   }
   const audit = response.audit || parseReferenceAudit(response.text, candidates);
   const url = conversationUrl(page.url());
