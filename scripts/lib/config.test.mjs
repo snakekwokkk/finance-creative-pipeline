@@ -20,8 +20,8 @@ test("legacy three-link review batches migrate to the current five-link default"
   assert.equal(migrated.browser.mode, "visible");
 });
 
-test("schema-versioned user batch overrides remain intentional", () => {
+test("schema-versioned user batch overrides normalize to the required five-link batch", () => {
   const defaults = { schemaVersion: 2, collection: { visualReviewBatchSize: 5 } };
   const migrated = migrateConfig({ schemaVersion: 2, collection: { visualReviewBatchSize: 4 } }, defaults);
-  assert.equal(migrated.collection.visualReviewBatchSize, 4);
+  assert.equal(migrated.collection.visualReviewBatchSize, 5);
 });

@@ -3,6 +3,7 @@ import path from "node:path";
 import sharp from "sharp";
 import { readJson, writeJsonAtomic } from "./state.mjs";
 import { screenshotFailure } from "./browser.mjs";
+import { REFERENCE_AUDIT_BATCH_SIZE } from "./config.mjs";
 import {
   assignAssetIndices,
   extractReconstructedAsset,
@@ -244,6 +245,14 @@ export function referenceAuditSubmissionDisposition(expectedPinIds, pendingPinId
   if (expected.length === pending.length
     && expected.every((pinId, index) => pinId === pending[index])) return "monitor";
   return "conflict";
+}
+
+export function assertReferenceAuditSubmissionBatchSize(candidateCount, disposition) {
+  if (disposition !== "submit") return;
+  if (Number(candidateCount) === REFERENCE_AUDIT_BATCH_SIZE) return;
+  const error = new Error(`新的 ChatGPT 参考图审核批次必须恰好包含 ${REFERENCE_AUDIT_BATCH_SIZE} 张候选，当前为 ${candidateCount} 张`);
+  error.code = "CHATGPT_REFERENCE_AUDIT_BATCH_SIZE";
+  throw error;
 }
 
 const pendingChatStageStatuses = new Set(["armed", "submitted-observed", "submission-unconfirmed"]);
@@ -1150,6 +1159,7 @@ export async function reviewReferenceCandidates({ page, project, config, runDir,
     const expectedPinIds = candidates.map((item) => String(item.pinId));
     const pendingPinIds = (state.chats?.[chatKey]?.pendingPinIds || []).map(String);
     const submissionDisposition = referenceAuditSubmissionDisposition(expectedPinIds, pendingPinIds);
+    assertReferenceAuditSubmissionBatchSize(candidates.length, submissionDisposition);
     if (submissionDisposition === "conflict") {
       const error = new Error(`${title} 仍有未完成审核批次 ${pendingPinIds.join("、")}；为防止重复或串批，禁止提交新批次`);
       error.code = "CHATGPT_REFERENCE_AUDIT_PENDING_CONFLICT";

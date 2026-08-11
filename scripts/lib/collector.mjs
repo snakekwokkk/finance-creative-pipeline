@@ -4,6 +4,7 @@ import path from "node:path";
 import sharp from "sharp";
 import { readJson, writeJsonAtomic } from "./state.mjs";
 import { screenshotFailure } from "./browser.mjs";
+import { REFERENCE_AUDIT_BATCH_SIZE } from "./config.mjs";
 
 const CSV_HEADER = "index,pin_id,reference_type,title,source_url,list_image_url,image_url,width,height,file_size,search_keyword,collected_at,sha256,ahash,dhash,provider\n";
 const HISTORY_FILE = "reference-history.json";
@@ -741,7 +742,7 @@ async function qualifiedExistingReferences(existing, minWidth, rejectionState, {
   }
   for (const type of ["popup", "banner", "float"]) {
     const typed = pending.filter((item) => item.referenceType === type);
-    for (let offset = 0; offset < typed.length; offset += visualReviewBatchSize) {
+    for (let offset = 0; offset + visualReviewBatchSize <= typed.length; offset += visualReviewBatchSize) {
       const batch = typed.slice(offset, offset + visualReviewBatchSize);
       const reviewed = await reviewCandidateBatch({
         visualReviewer,
@@ -795,7 +796,7 @@ export async function collectReferences({
   const minWidth = Math.max(1, Number(config.collection.minReferenceWidthPx || 720));
   const maxSearchScrolls = Math.max(1, Number(config.collection.maxSearchScrolls || 20));
   const maxCandidatesPerKeyword = Math.max(1, Number(config.collection.maxCandidatesPerKeyword || 3));
-  const visualReviewBatchSize = Math.max(1, Math.min(5, Number(config.collection.visualReviewBatchSize || 5)));
+  const visualReviewBatchSize = REFERENCE_AUDIT_BATCH_SIZE;
   const visualReviewMaxAttempts = Math.max(1, Number(config.collection.visualReviewMaxAttempts || 2));
   const plans = buildSearchPlans(config.collection, count, date);
   const rejectionState = await loadReferenceRejections(config.outputRoot, runDir);

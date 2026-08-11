@@ -7,6 +7,7 @@ const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 export const pluginRoot = path.resolve(moduleDir, "../..");
 export const appSupportDir = path.join(os.homedir(), "Library", "Application Support", "Codex", "finance-creative-pipeline");
 export const configPath = path.join(appSupportDir, "config.json");
+export const REFERENCE_AUDIT_BATCH_SIZE = 5;
 
 function mergeConfig(defaults, local) {
   if (Array.isArray(defaults) || Array.isArray(local)) return local === undefined ? defaults : local;
@@ -22,10 +23,8 @@ function mergeConfig(defaults, local) {
 
 export function migrateConfig(raw, defaults) {
   const migrated = mergeConfig(defaults, raw);
-  const schemaVersion = Number(raw?.schemaVersion || 0);
-  if (schemaVersion < 2 && Number(raw?.collection?.visualReviewBatchSize) === 3) {
-    migrated.collection.visualReviewBatchSize = 5;
-  }
+  migrated.collection ||= {};
+  migrated.collection.visualReviewBatchSize = REFERENCE_AUDIT_BATCH_SIZE;
   migrated.schemaVersion = 2;
   return migrated;
 }

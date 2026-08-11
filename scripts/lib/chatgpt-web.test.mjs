@@ -6,6 +6,7 @@ import test from "node:test";
 import sharp from "sharp";
 import {
   activeDirectionFailures,
+  assertReferenceAuditSubmissionBatchSize,
   assistantReportsMissingReferenceImages,
   attachmentDeliveryStatus,
   chatGptLoginRequired,
@@ -264,6 +265,15 @@ test("reference audit batches are submit-once and become passive monitors after 
   assert.equal(referenceAuditSubmissionDisposition(current, current), "monitor");
   assert.equal(referenceAuditSubmissionDisposition(current, ["p1", "p2"]), "conflict");
   assert.equal(referenceAuditSubmissionDisposition(current, ["old1", "old2", "old3", "old4", "old5"]), "conflict");
+});
+
+test("new reference audit submissions require five candidates while legacy recovery keeps its original size", () => {
+  assert.doesNotThrow(() => assertReferenceAuditSubmissionBatchSize(5, "submit"));
+  assert.throws(
+    () => assertReferenceAuditSubmissionBatchSize(1, "submit"),
+    (error) => error.code === "CHATGPT_REFERENCE_AUDIT_BATCH_SIZE" && /恰好包含 5 张/.test(error.message)
+  );
+  assert.doesNotThrow(() => assertReferenceAuditSubmissionBatchSize(1, "monitor"));
 });
 
 test("all ChatGPT stages passively monitor an armed prompt instead of resubmitting", () => {
