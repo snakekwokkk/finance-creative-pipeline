@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 5,
   "timezone": "Asia/Shanghai",
   "chromeExecutable": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   "profileDirectory": "~/Library/Application Support/Codex/finance-creative-pipeline/chrome-profile",
@@ -22,19 +22,24 @@
     "maxScannedCandidatesPerDirection": 30,
     "maxCandidatesPerKeyword": 3,
     "maxDownloadedCandidatesPerDirection": 8,
-    "visualReviewBatchSize": 5,
+    "visualReviewBatchSize": 6,
+    "visualReviewMaxBatchesPerType": 3,
     "visualReviewTimeoutMinutes": 4,
     "visualReviewMaxAttempts": 2,
+    "visualReviewDomPollIntervalSeconds": 1,
+    "visualReviewSavedConversationPollIntervalSeconds": 15,
+    "visualReviewSubmissionIntervalSeconds": 30,
+    "visualReviewRateLimitCooldownMinutes": 10,
     "maxSearchScrolls": 20,
     "searchPlans": [
       {
         "type": "popup",
-        "count": 6,
+        "count": 5,
         "keywords": ["互联网金融 弹窗", "借贷 活动弹窗", "助贷 营销弹窗", "贷款 优惠券弹窗", "金融 福利弹窗", "借款 结果弹窗", "金融 App 弹窗", "贷款 运营弹窗"]
       },
       {
         "type": "banner",
-        "count": 2,
+        "count": 3,
         "keywords": ["金融banner", "理财banner", "投资理财banner", "金融产品banner", "基金理财banner", "证券banner", "简约金融banner"]
       },
       {

@@ -22,6 +22,32 @@ function remainingAttemptTimeout(startedAt, limit) {
   return Math.max(1_000, limit - (Date.now() - startedAt));
 }
 
+function secondsToMs(value, fallback, minimum = 0.25) {
+  const seconds = Number(value);
+  return Math.max(minimum, Number.isFinite(seconds) ? seconds : fallback) * 1_000;
+}
+
+export function referenceAuditPacing(config = {}) {
+  const collection = config?.collection || {};
+  return {
+    domPollIntervalMs: secondsToMs(collection.visualReviewDomPollIntervalSeconds, 1),
+    savedConversationPollIntervalMs: secondsToMs(collection.visualReviewSavedConversationPollIntervalSeconds, 15, 1),
+    submissionIntervalMs: secondsToMs(collection.visualReviewSubmissionIntervalSeconds, 30, 0),
+    rateLimitCooldownMs: minuteTimeout(collection.visualReviewRateLimitCooldownMinutes || 10)
+  };
+}
+
+export function referenceAuditSubmissionDelayMs({ lastSubmissionAt = null, now = Date.now(), intervalMs = 0 } = {}) {
+  const submittedAt = Date.parse(String(lastSubmissionAt || ""));
+  if (!Number.isFinite(submittedAt)) return 0;
+  return Math.max(0, submittedAt + Math.max(0, Number(intervalMs) || 0) - Number(now));
+}
+
+export function chatGptRateLimitNotice(text) {
+  return /操作(?:太|过于)频繁|请求(?:太|过于)频繁|操作频率过高|请稍后(?:再试|操作)|too many requests|rate.?limit(?:ed)?|try again later/i
+    .test(String(text || ""));
+}
+
 function extractMarkedJson(text, start, end) {
   const candidate = text.match(new RegExp(`${start}\\s*([\\s\\S]*?)\\s*${end}`))?.[1] || text.match(/```json\\s*([\\s\\S]*?)```/i)?.[1];
   if (!candidate) throw new Error(`ChatGPT 回复中未找到 ${start} JSON`);
@@ -799,6 +825,15 @@ export function promptSubmissionObserved({ beforeUserCount = 0, afterUserCount =
   return createdConversation || afterUserCount > beforeUserCount || !String(composerText || "").trim();
 }
 
+export function promptSubmissionDefinitelyNotAccepted({ expectedPrompt = "", composerText = "", sendVisible = false, sendEnabled = false } = {}) {
+  const normalize = (value) => String(value || "").replace(/\r\n/g, "\n").trim();
+  const expected = normalize(expectedPrompt);
+  return Boolean(expected)
+    && normalize(composerText) === expected
+    && sendVisible === true
+    && sendEnabled === true;
+}
+
 async function waitForPromptSubmission(page, box, before, timeout = 5_000) {
   const started = Date.now();
   while (Date.now() - started < timeout) {
@@ -814,6 +849,15 @@ async function waitForPromptSubmission(page, box, before, timeout = 5_000) {
     await page.waitForTimeout(250);
   }
   return false;
+}
+
+async function submissionDefinitelyNotAccepted(page, box, prompt, button) {
+  return promptSubmissionDefinitelyNotAccepted({
+    expectedPrompt: prompt,
+    composerText: await box.textContent().catch(() => ""),
+    sendVisible: await button.isVisible().catch(() => false),
+    sendEnabled: await button.isEnabled().catch(() => false)
+  });
 }
 
 async function waitForConversationUrl(page, timeout = 15_000) {
@@ -853,8 +897,22 @@ async function sendPrompt(page, prompt) {
       for (let index = 0; index < count; index += 1) {
         const button = candidate.nth(index);
         if (await button.isVisible().catch(() => false) && await button.isEnabled().catch(() => false)) {
-          await button.click({ force: true });
+          // Wait for the actual control to be actionable. A forced click can
+          // be swallowed by ChatGPT while the long prompt remains unchanged.
+          await button.click({ timeout: 15_000 });
           if (await waitForPromptSubmission(page, box, before, 15_000)) return;
+          const definitelyNotAccepted = await submissionDefinitelyNotAccepted(page, box, prompt, button);
+          const rateLimitNotice = await visibleChatGptRateLimitNotice(page);
+          if (definitelyNotAccepted && rateLimitNotice) {
+            const error = new Error(`ChatGPT 提示操作太频繁，本次提示词未提交：${rateLimitNotice}`);
+            error.code = "CHATGPT_RATE_LIMITED_NOT_ATTEMPTED";
+            throw error;
+          }
+          if (definitelyNotAccepted) {
+            const error = new Error("ChatGPT 提示词仍完整留在输入框且发送按钮仍可用；页面未接受本次点击，可安全恢复发送");
+            error.code = "CHATGPT_SUBMISSION_NOT_ATTEMPTED";
+            throw error;
+          }
           const error = new Error("ChatGPT 提交动作已执行一次，但页面未确认；已锁定本批次并停止，禁止自动重发");
           error.code = "CHATGPT_SUBMISSION_UNCONFIRMED";
           throw error;
@@ -899,12 +957,12 @@ async function waitForAssistantText(page, previousCount, timeout) {
 
 const conversationApiCache = new WeakMap();
 
-async function conversationApiPayload(page) {
+async function conversationApiPayload(page, minIntervalMs = 1_000) {
   const conversationId = page.url().match(/\/c\/([^/?#]+)/)?.[1];
   if (!conversationId) return null;
   const now = Date.now();
   const cached = conversationApiCache.get(page);
-  if (cached && now - cached.at < 1_000) return cached.payload;
+  if (cached && now - cached.at < Math.max(1_000, Number(minIntervalMs) || 1_000)) return cached.payload;
   const payload = await page.evaluate(async (id) => {
     try {
       const response = await fetch(`/backend-api/conversation/${encodeURIComponent(id)}`, {
@@ -921,15 +979,15 @@ async function conversationApiPayload(page) {
   return payload;
 }
 
-async function conversationApiTextSnapshots(page) {
-  return conversationApiSnapshotTexts(await conversationApiPayload(page));
+async function conversationApiTextSnapshots(page, minIntervalMs = 1_000) {
+  return conversationApiSnapshotTexts(await conversationApiPayload(page, minIntervalMs));
 }
 
 async function conversationApiImages(page) {
   return conversationApiImageCandidates(await conversationApiPayload(page));
 }
 
-async function conversationTextSnapshots(page) {
+async function conversationTextSnapshots(page, { savedConversationPollIntervalMs = 1_000 } = {}) {
   const snapshots = [];
   const selectors = [
     '[data-message-author-role="assistant"]',
@@ -949,8 +1007,117 @@ async function conversationTextSnapshots(page) {
     page.locator("body").textContent().catch(() => "")
   ]);
   snapshots.push(bodyInnerText, bodyTextContent || "");
-  snapshots.push(...await conversationApiTextSnapshots(page));
+  snapshots.push(...await conversationApiTextSnapshots(page, savedConversationPollIntervalMs));
   return snapshots;
+}
+
+export async function existingDecompositionConversationState(page) {
+  const snapshots = await conversationTextSnapshots(page);
+  return {
+    snapshots,
+    recovered: latestNewDecompositionResponse(snapshots, new Set()),
+    knownKeys: new Set(snapshots.flatMap(decompositionObservations).map((response) => response.key))
+  };
+}
+
+async function visibleChatGptRateLimitNotice(page) {
+  const selectors = [
+    '[role="dialog"]',
+    '[role="alert"]',
+    '[aria-live="assertive"]',
+    '[data-sonner-toast]',
+    '[data-testid*="modal"]',
+    '[data-radix-portal]',
+    '[class*="toast"]',
+    '[class*="modal"]'
+  ];
+  for (const selector of selectors) {
+    const nodes = page.locator(selector);
+    for (let index = 0; index < await nodes.count(); index += 1) {
+      const node = nodes.nth(index);
+      if (!await node.isVisible().catch(() => false)) continue;
+      const text = await node.innerText().catch(() => "");
+      if (chatGptRateLimitNotice(text)) return text.trim();
+    }
+  }
+  return null;
+}
+
+async function waitForReferenceAuditSubmissionWindow(page, state, stateFile, pacing) {
+  const delayMs = referenceAuditSubmissionDelayMs({
+    lastSubmissionAt: state?.pacing?.lastSubmissionAt,
+    intervalMs: pacing.submissionIntervalMs
+  });
+  if (delayMs <= 0) return;
+  const resumeAt = new Date(Date.now() + delayMs).toISOString();
+  state.pacing = { ...(state.pacing || {}), submissionResumeAt: resumeAt };
+  await writeJsonAtomic(stateFile, state);
+  console.log(JSON.stringify({ event: "reference_audit_submission_cooldown", waitMs: delayMs, resumeAt }));
+  let remaining = delayMs;
+  while (remaining > 0) {
+    if (page.isClosed()) throw new Error("ChatGPT 页面已关闭，无法等待参考图审核提交间隔");
+    const step = Math.min(30_000, remaining);
+    await page.waitForTimeout(step);
+    remaining -= step;
+  }
+  state.pacing = { ...(state.pacing || {}), submissionResumeAt: null };
+  await writeJsonAtomic(stateFile, state);
+}
+
+async function recordReferenceAuditSubmission(state, stateFile) {
+  state.pacing = {
+    ...(state.pacing || {}),
+    lastSubmissionAt: new Date().toISOString(),
+    submissionResumeAt: null
+  };
+  await writeJsonAtomic(stateFile, state);
+}
+
+async function recoverReferenceAuditRateLimit({ page, state, stateFile, pacing, chatUrl, notice }) {
+  const detectedAt = new Date().toISOString();
+  const resumeAt = new Date(Date.now() + pacing.rateLimitCooldownMs).toISOString();
+  state.rateLimit = { detectedAt, resumeAt, notice: String(notice || "操作太频繁") };
+  await writeJsonAtomic(stateFile, state);
+  console.warn(`ChatGPT 审图触发操作频率限制；已保留当前批次，将冷却至 ${resumeAt} 后从原聊天继续监听`);
+  let remaining = pacing.rateLimitCooldownMs;
+  while (remaining > 0) {
+    if (page.isClosed()) throw new Error("ChatGPT 页面已关闭，无法等待审图限频冷却");
+    const step = Math.min(30_000, remaining);
+    await page.waitForTimeout(step);
+    remaining -= step;
+  }
+  await navigateWithRetry(page, chatUrl);
+  const stillLimited = await visibleChatGptRateLimitNotice(page);
+  if (stillLimited) {
+    const error = new Error(`ChatGPT 审图冷却后仍提示操作太频繁，请稍后恢复同一运行：${stillLimited}`);
+    error.code = "CHATGPT_REFERENCE_AUDIT_RATE_LIMITED";
+    throw error;
+  }
+  state.rateLimit = { ...state.rateLimit, clearedAt: new Date().toISOString(), resumeAt: null };
+  await writeJsonAtomic(stateFile, state);
+}
+
+async function sendReferenceAuditPromptWithPacing({ page, prompt, state, stateFile, pacing, chatUrl }) {
+  for (let rateLimitAttempt = 0; rateLimitAttempt < 2; rateLimitAttempt += 1) {
+    await waitForReferenceAuditSubmissionWindow(page, state, stateFile, pacing);
+    try {
+      await sendPrompt(page, prompt);
+      await recordReferenceAuditSubmission(state, stateFile);
+      return;
+    } catch (error) {
+      if (error?.code !== "CHATGPT_RATE_LIMITED_NOT_ATTEMPTED") throw error;
+      await recordReferenceAuditSubmission(state, stateFile);
+      if (rateLimitAttempt >= 1) throw error;
+      await recoverReferenceAuditRateLimit({
+        page,
+        state,
+        stateFile,
+        pacing,
+        chatUrl,
+        notice: error.message
+      });
+    }
+  }
 }
 
 async function waitForDecompositionResponse(page, knownKeys, timeout) {
@@ -978,29 +1145,51 @@ async function currentReferenceAuditResponse(page, candidates) {
   );
 }
 
-async function waitForReferenceAuditResponse(page, candidates, timeout, knownKeys = new Set()) {
-  const started = Date.now();
-  while (Date.now() - started < timeout) {
+async function waitForReferenceAuditResponse(page, candidates, timeout, knownKeys = new Set(), {
+  domPollIntervalMs = 1_000,
+  savedConversationPollIntervalMs = 15_000,
+  onRateLimit = null
+} = {}) {
+  let deadline = Date.now() + timeout;
+  let rateLimitRecoveryCount = 0;
+  while (Date.now() < deadline) {
     if (page.isClosed()) throw new Error("ChatGPT 页面已关闭，无法继续等待参考图内容审核结果");
-    const observation = latestNewReferenceAuditObservation(await conversationTextSnapshots(page), candidates, knownKeys);
+    const notice = await visibleChatGptRateLimitNotice(page);
+    if (notice) {
+      if (rateLimitRecoveryCount >= 1 || typeof onRateLimit !== "function") {
+        const error = new Error(`ChatGPT 审图提示操作太频繁，请稍后恢复同一运行：${notice}`);
+        error.code = "CHATGPT_REFERENCE_AUDIT_RATE_LIMITED";
+        throw error;
+      }
+      const pausedAt = Date.now();
+      await onRateLimit(notice);
+      deadline += Date.now() - pausedAt;
+      rateLimitRecoveryCount += 1;
+      continue;
+    }
+    const observation = latestNewReferenceAuditObservation(await conversationTextSnapshots(page, {
+      savedConversationPollIntervalMs
+    }), candidates, knownKeys);
     if (observation?.valid) return observation;
     if (observation && !observation.valid) {
       const error = new Error(`ChatGPT 已返回参考图审核标记，但结果无效：${observation.error}`);
       error.code = "CHATGPT_REFERENCE_AUDIT_INVALID";
       throw error;
     }
-    await page.waitForTimeout(250);
+    await page.waitForTimeout(domPollIntervalMs);
   }
   const graceStarted = Date.now();
   while (Date.now() - graceStarted < 5_000) {
-    const observation = latestNewReferenceAuditObservation(await conversationTextSnapshots(page), candidates, knownKeys);
+    const observation = latestNewReferenceAuditObservation(await conversationTextSnapshots(page, {
+      savedConversationPollIntervalMs
+    }), candidates, knownKeys);
     if (observation?.valid) return observation;
     if (observation && !observation.valid) {
       const error = new Error(`ChatGPT 已返回参考图审核标记，但结果无效：${observation.error}`);
       error.code = "CHATGPT_REFERENCE_AUDIT_INVALID";
       throw error;
     }
-    await page.waitForTimeout(250);
+    await page.waitForTimeout(domPollIntervalMs);
   }
   const error = new Error(`等待 ChatGPT 参考图内容审核标记超时（${Math.round(timeout / 1000)} 秒）`);
   error.code = "CHATGPT_REFERENCE_AUDIT_TIMEOUT";
@@ -1121,6 +1310,7 @@ export async function reviewReferenceCandidates({ page, project, config, runDir,
   const state = await readJson(stateFile, { schemaVersion: 1, chats: {}, batches: [] });
   state.chats ||= {};
   state.batches ||= [];
+  const pacing = referenceAuditPacing(config);
   const provider = candidates[0]?.provider || config?.collection?.source || "huaban";
   const chatKey = provider === "huaban" ? type : `${provider}:${type}`;
   let saved = state.chats[chatKey];
@@ -1132,7 +1322,25 @@ export async function reviewReferenceCandidates({ page, project, config, runDir,
       state.chats[chatKey] = saved;
       await writeJsonAtomic(stateFile, state);
     } else {
-      await sendPrompt(page, referenceAuditChatBootstrapPrompt(title));
+      const preflightRateLimit = await visibleChatGptRateLimitNotice(page);
+      if (preflightRateLimit) {
+        await recoverReferenceAuditRateLimit({
+          page,
+          state,
+          stateFile,
+          pacing,
+          chatUrl: project.url,
+          notice: preflightRateLimit
+        });
+      }
+      await sendReferenceAuditPromptWithPacing({
+        page,
+        prompt: referenceAuditChatBootstrapPrompt(title),
+        state,
+        stateFile,
+        pacing,
+        chatUrl: project.url
+      });
       const createdUrl = await waitForConversationUrl(page, 30_000);
       if (!createdUrl) throw new Error(`无法在当日项目中创建“${title}”审核聊天`);
       saved = { url: createdUrl, title: null, titleVerified: false, projectUrl: project.url, updatedAt: new Date().toISOString(), pendingPinIds: [] };
@@ -1151,8 +1359,21 @@ export async function reviewReferenceCandidates({ page, project, config, runDir,
     }
   }
   await openDirectionChat(page, project, saved.url);
+  const preflightRateLimit = await visibleChatGptRateLimitNotice(page);
+  if (preflightRateLimit) {
+    await recoverReferenceAuditRateLimit({
+      page,
+      state,
+      stateFile,
+      pacing,
+      chatUrl: saved.url,
+      notice: preflightRateLimit
+    });
+  }
   const timeout = minuteTimeout(config?.collection?.visualReviewTimeoutMinutes || 4);
-  const initialSnapshots = await conversationTextSnapshots(page);
+  const initialSnapshots = await conversationTextSnapshots(page, {
+    savedConversationPollIntervalMs: pacing.savedConversationPollIntervalMs
+  });
   const knownKeys = new Set(initialSnapshots.flatMap((text) => referenceAuditObservations(text, candidates).map((item) => item.key)));
   let response = latestReferenceAuditResponse(initialSnapshots, candidates);
   if (!response) {
@@ -1181,17 +1402,28 @@ export async function reviewReferenceCandidates({ page, project, config, runDir,
       };
       await writeJsonAtomic(stateFile, state);
       try {
-        await sendPrompt(page, referenceAuditPrompt(type, candidates));
+        await sendReferenceAuditPromptWithPacing({
+          page,
+          prompt: referenceAuditPrompt(type, candidates),
+          state,
+          stateFile,
+          pacing,
+          chatUrl: saved.url
+        });
       } catch (error) {
+        const definitelyNotAttempted = [
+          "CHATGPT_SUBMISSION_NOT_ATTEMPTED",
+          "CHATGPT_RATE_LIMITED_NOT_ATTEMPTED"
+        ].includes(error?.code);
         state.chats[chatKey] = {
           ...state.chats[chatKey],
           updatedAt: new Date().toISOString(),
-          submissionStatus: error?.code === "CHATGPT_SUBMISSION_NOT_ATTEMPTED"
+          submissionStatus: definitelyNotAttempted
             ? "not-attempted"
             : "submission-unconfirmed",
           submissionError: String(error?.message || error)
         };
-        if (error?.code === "CHATGPT_SUBMISSION_NOT_ATTEMPTED") {
+        if (definitelyNotAttempted) {
           state.chats[chatKey].pendingPinIds = [];
           state.chats[chatKey].pendingCandidates = [];
         }
@@ -1212,7 +1444,18 @@ export async function reviewReferenceCandidates({ page, project, config, runDir,
       };
       await writeJsonAtomic(stateFile, state);
     }
-    response = await waitForReferenceAuditResponse(page, candidates, timeout, knownKeys);
+    response = await waitForReferenceAuditResponse(page, candidates, timeout, knownKeys, {
+      domPollIntervalMs: pacing.domPollIntervalMs,
+      savedConversationPollIntervalMs: pacing.savedConversationPollIntervalMs,
+      onRateLimit: (notice) => recoverReferenceAuditRateLimit({
+        page,
+        state,
+        stateFile,
+        pacing,
+        chatUrl: saved.url,
+        notice
+      })
+    });
   }
   const audit = response.audit || parseReferenceAudit(response.text, candidates);
   await stopActiveResponse(page).catch(() => false);
@@ -1717,9 +1960,9 @@ export async function decomposePreview(
   const decompositionPromptKey = `decomposition:${index}:${width}x${height}:${previewStat.size}:${Math.floor(previewStat.mtimeMs)}`;
 
   if (!layers) {
-    const existingSnapshots = await decompositionTextSnapshots(page);
-    const recovered = force ? null : latestNewDecompositionResponse(existingSnapshots, new Set());
-    knownDecompositionKeys = new Set(existingSnapshots.flatMap(decompositionObservations).map((response) => response.key));
+    const existingState = await existingDecompositionConversationState(page);
+    const recovered = force ? null : existingState.recovered;
+    knownDecompositionKeys = existingState.knownKeys;
     if (recovered) {
       await fs.writeFile(path.join(directionDir, "decomposition-analysis.txt"), recovered.text, "utf8");
       layers = assignAssetIndices(recovered.payload, maxAssets);
@@ -2061,10 +2304,10 @@ export async function generateDirections({
     }
     const forceRegeneration = invalidatedDirections.has(index);
     const legacySpec = forceRegeneration ? null : await readJson(specFile);
-    const type = directionTypes?.[zero] || (index <= 6 ? "popup" : index <= 8 ? "banner" : "float");
+    const type = directionTypes?.[zero] || (index <= 5 ? "popup" : index <= 8 ? "banner" : "float");
     const typeIndex = directionTypes
       ? directionTypes.slice(0, zero).filter((candidate) => candidate === type).length
-      : type === "popup" ? index - 1 : type === "banner" ? index - 7 : index - 9;
+      : type === "popup" ? index - 1 : type === "banner" ? index - 6 : index - 9;
     const chatTitle = directionChatTitle(type, typeIndex);
     let reference;
     try {
@@ -2269,23 +2512,29 @@ export async function generateDirections({
       }
 
       await ensureDirectionChat();
-      const layers = await decomposePreview(
-        page,
-        config,
-        previewFile,
-        directionDir,
-        index,
-        size.width,
-        size.height,
-        type,
-        rememberConversation,
-        recoverDecompositionConversation,
-        {
-          decompositionAttempts: decompositionAttemptLimit(config, historicalFailure),
-          transparentAssetAttempts: transparentAssetAttemptLimit(config, historicalFailure),
-          force: forceRegeneration
-        }
-      );
+      let layers;
+      try {
+        layers = await decomposePreview(
+          page,
+          config,
+          previewFile,
+          directionDir,
+          index,
+          size.width,
+          size.height,
+          type,
+          rememberConversation,
+          recoverDecompositionConversation,
+          {
+            decompositionAttempts: decompositionAttemptLimit(config, historicalFailure),
+            transparentAssetAttempts: transparentAssetAttemptLimit(config, historicalFailure),
+            force: forceRegeneration
+          }
+        );
+      } catch (error) {
+        error.stage ||= "decomposition";
+        throw error;
+      }
       const chatUrl = await rememberConversation();
 
       const entry = {

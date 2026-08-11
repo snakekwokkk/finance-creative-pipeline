@@ -22,7 +22,7 @@ const FLOAT_BLOCKED_PATTERN = /背景|底图|纹理|壁纸|弥散|边框|框架|
 const DEFAULT_SEARCH_PLANS = [
   {
     type: "popup",
-    count: 6,
+    count: 5,
     keywords: [
       "互联网金融 弹窗", "借贷 活动弹窗", "助贷 营销弹窗", "贷款 优惠券弹窗",
       "金融 福利弹窗", "借款 结果弹窗", "金融 App 弹窗", "贷款 运营弹窗"
@@ -30,7 +30,7 @@ const DEFAULT_SEARCH_PLANS = [
   },
   {
     type: "banner",
-    count: 2,
+    count: 3,
     keywords: [
       "金融banner", "理财banner", "投资理财banner", "金融产品banner",
       "基金理财banner", "证券banner", "简约金融banner"
@@ -345,6 +345,10 @@ export function collectionCandidateBudgets(requiredCount, existingCount = 0, col
   };
 }
 
+export function referenceAuditRoundsRemaining(completedRounds, maxRounds = 3) {
+  return Math.max(0, Math.max(1, Number(maxRounds || 3)) - Math.max(0, Number(completedRounds || 0)));
+}
+
 function historyRecord(item, date) {
   return {
     provider: referenceProvider(item),
@@ -649,7 +653,7 @@ async function downloadBestImage(context, item, urls, targetFile, minWidth, brow
 }
 
 export function referenceCollectionRequiresUserAction(error) {
-  return /登录|验证码|安全验证|异常访问|访问被阻止|权限|account session|access denied|captcha|waf|连续\s*2\s*次失败[\s\S]*提示词已填写但未能提交/i
+  return /登录|验证码|安全验证|异常访问|访问被阻止|权限|操作(?:太|过于)频繁|请求(?:太|过于)频繁|account session|access denied|captcha|waf|too many requests|rate.?limit|try again later|连续\s*2\s*次失败[\s\S]*提示词已填写但未能提交/i
     .test(String(error?.message || error));
 }
 
@@ -687,7 +691,9 @@ async function qualifiedExistingReferences(existing, minWidth, rejectionState, {
   sourceProvider,
   visualReviewer,
   visualReviewBatchSize,
-  visualReviewMaxAttempts
+  visualReviewMaxAttempts,
+  visualReviewMaxBatchesPerType,
+  reviewBatchCounts
 }) {
   const qualified = [];
   const pending = [];
@@ -743,6 +749,7 @@ async function qualifiedExistingReferences(existing, minWidth, rejectionState, {
   for (const type of ["popup", "banner", "float"]) {
     const typed = pending.filter((item) => item.referenceType === type);
     for (let offset = 0; offset + visualReviewBatchSize <= typed.length; offset += visualReviewBatchSize) {
+      if (referenceAuditRoundsRemaining(reviewBatchCounts.get(type), visualReviewMaxBatchesPerType) === 0) break;
       const batch = typed.slice(offset, offset + visualReviewBatchSize);
       const reviewed = await reviewCandidateBatch({
         visualReviewer,
@@ -750,6 +757,7 @@ async function qualifiedExistingReferences(existing, minWidth, rejectionState, {
         candidates: batch,
         attempts: visualReviewMaxAttempts
       });
+      reviewBatchCounts.set(type, Number(reviewBatchCounts.get(type) || 0) + 1);
       for (const { candidate, audit } of reviewed) {
         if (audit.accepted) {
           qualified.push({ ...candidate, contentAudit: audit });
@@ -798,13 +806,22 @@ export async function collectReferences({
   const maxCandidatesPerKeyword = Math.max(1, Number(config.collection.maxCandidatesPerKeyword || 3));
   const visualReviewBatchSize = REFERENCE_AUDIT_BATCH_SIZE;
   const visualReviewMaxAttempts = Math.max(1, Number(config.collection.visualReviewMaxAttempts || 2));
+  const visualReviewMaxBatchesPerType = Math.max(1, Number(config.collection.visualReviewMaxBatchesPerType || 3));
   const plans = buildSearchPlans(config.collection, count, date);
   const rejectionState = await loadReferenceRejections(config.outputRoot, runDir);
+  const auditStateFile = path.join(runDir, "reference-audit-chats.json");
+  const initialAuditState = await readJson(auditStateFile, { schemaVersion: 1, chats: {}, batches: [], queuedCandidates: {} });
+  const reviewBatchCounts = new Map(["popup", "banner", "float"].map((type) => [
+    type,
+    (initialAuditState.batches || []).filter((item) => item.type === type && (item.provider || "huaban") === sourceProvider).length
+  ]));
   const results = await qualifiedExistingReferences(existing, minWidth, rejectionState, {
     sourceProvider,
     visualReviewer,
     visualReviewBatchSize,
-    visualReviewMaxAttempts
+    visualReviewMaxAttempts,
+    visualReviewMaxBatchesPerType,
+    reviewBatchCounts
   });
   if (existing.length) await writeJsonAtomic(path.join(runDir, "references.json"), results);
   const existingSelection = selectReferencesForPlans(results, plans);
@@ -828,7 +845,6 @@ export async function collectReferences({
       let queryCursor = 0;
       let emptyQueries = 0;
       const reviewQueue = [];
-      const auditStateFile = path.join(runDir, "reference-audit-chats.json");
       const auditState = await readJson(auditStateFile, { schemaVersion: 1, chats: {}, batches: [], queuedCandidates: {} });
       auditState.queuedCandidates ||= {};
 
@@ -845,6 +861,7 @@ export async function collectReferences({
           await persistReviewQueue();
           return false;
         }
+        if (referenceAuditRoundsRemaining(reviewBatchCounts.get(plan.type), visualReviewMaxBatchesPerType) === 0) return false;
         if (!allowPartialRecovery && reviewQueue.length < visualReviewBatchSize) return false;
         const batch = reviewQueue.splice(0, visualReviewBatchSize);
         await persistReviewQueue();
@@ -863,6 +880,7 @@ export async function collectReferences({
           console.warn(`${plan.type} 候选批次内容审核失败，已保留该批供下次恢复：${error.message}`);
           return false;
         }
+        reviewBatchCounts.set(plan.type, Number(reviewBatchCounts.get(plan.type) || 0) + 1);
         reviewed.sort((left, right) => Number(right.audit.score || 0) - Number(left.audit.score || 0));
         for (const { candidate, audit } of reviewed) {
           if (audit.accepted && acceptedForType < plan.count) {
@@ -1010,6 +1028,7 @@ export async function collectReferences({
       if (reviewQueue.length >= visualReviewBatchSize) await flushReviewQueue();
 
       while (acceptedForType < plan.count
+        && referenceAuditRoundsRemaining(reviewBatchCounts.get(plan.type), visualReviewMaxBatchesPerType) > 0
         && scannedCandidates < budgets.scanned
         && downloadedCandidates < budgets.downloaded
         && emptyQueries < plan.keywords.length * 2) {
@@ -1091,9 +1110,16 @@ export async function collectReferences({
           }
         }
       }
-      await persistReviewQueue();
-      if (reviewQueue.length) {
-        console.warn(`${plan.type} 尚有 ${reviewQueue.length}/${visualReviewBatchSize} 个候选，未提交不足 5 条的审核批次，已保存供下次补齐`);
+      const reviewRounds = Number(reviewBatchCounts.get(plan.type) || 0);
+      if (referenceAuditRoundsRemaining(reviewRounds, visualReviewMaxBatchesPerType) === 0) {
+        reviewQueue.length = 0;
+        await persistReviewQueue();
+        console.warn(`${plan.type} 已完成最多 ${visualReviewMaxBatchesPerType} 轮、共审核至多 ${visualReviewMaxBatchesPerType * visualReviewBatchSize} 张候选；保留 ${acceptedForType}/${plan.count} 张并转入下一类型`);
+      } else if (reviewQueue.length) {
+        await persistReviewQueue();
+        console.warn(`${plan.type} 尚有 ${reviewQueue.length}/${visualReviewBatchSize} 个候选，未提交不足 ${visualReviewBatchSize} 条的审核批次，已保存供下次补齐`);
+      } else {
+        await persistReviewQueue();
       }
       if (acceptedForType < plan.count) {
         console.warn(`${plan.type} 参考图仅采集到 ${acceptedForType}/${plan.count}；已扫描 ${scannedCandidates}/${budgets.scanned} 个候选，审核通过后下载验证 ${downloadedCandidates}/${budgets.downloaded} 张，跳过缺失方向并继续`);

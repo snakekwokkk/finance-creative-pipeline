@@ -1,7 +1,7 @@
 {
   "name": "finance-creative-pipeline-runtime",
   "private": true,
-  "version": "1.6.6",
+  "version": "1.7.1",
   "type": "module",
   "scripts": {
     "setup": "node scripts/setup-login.mjs",

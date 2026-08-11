@@ -16,6 +16,7 @@ import {
   looksLikeBlockedPage,
   minimumReferenceWidth,
   normalizeReferenceProvider,
+  referenceAuditRoundsRemaining,
   referenceCollectionRequiresUserAction,
   referenceIdentityKey,
   referenceProvider,
@@ -24,10 +25,19 @@ import {
   selectReferencesForPlans
 } from "./collector.mjs";
 
+test("each reference type stops after three six-link audit rounds", () => {
+  assert.equal(referenceAuditRoundsRemaining(0, 3), 3);
+  assert.equal(referenceAuditRoundsRemaining(1, 3), 2);
+  assert.equal(referenceAuditRoundsRemaining(2, 3), 1);
+  assert.equal(referenceAuditRoundsRemaining(3, 3), 0);
+  assert.equal(referenceAuditRoundsRemaining(4, 3), 0);
+});
+
 test("reference collection security blockers stop the workflow globally", () => {
   assert.equal(referenceCollectionRequiresUserAction(new Error("花瓣详情页要求安全验证")), true);
   assert.equal(referenceCollectionRequiresUserAction(new Error("花瓣验证码待处理")), true);
   assert.equal(referenceCollectionRequiresUserAction(new Error("float 参考图内容审核连续 2 次失败：ChatGPT 提示词已填写但未能提交")), true);
+  assert.equal(referenceCollectionRequiresUserAction(new Error("ChatGPT 审图冷却后仍提示操作太频繁")), true);
   assert.equal(referenceCollectionRequiresUserAction(new Error("ChatGPT 提示词已填写但未能提交")), false);
   assert.equal(referenceCollectionRequiresUserAction(new Error("Pin 详情页图片下载失败")), false);
 });
@@ -49,8 +59,8 @@ test("reference collection is limited to Huaban", () => {
 test("default search plan preserves type quotas", () => {
   const plans = buildSearchPlans({}, 10, "2026-08-04");
   assert.deepEqual(plans.map(({ type, count }) => ({ type, count })), [
-    { type: "popup", count: 6 },
-    { type: "banner", count: 2 },
+    { type: "popup", count: 5 },
+    { type: "banner", count: 3 },
     { type: "float", count: 2 }
   ]);
   assert.ok(plans[0].keywords.every((keyword) => /弹窗/.test(keyword)));
@@ -94,7 +104,7 @@ test("cached references are selected by type quota instead of taking the first t
   const plans = buildSearchPlans({}, 10, "2026-08-04");
   const selected = selectReferencesForPlans(references, plans);
   assert.deepEqual(selected.map((item) => item.referenceType), [
-    "popup", "popup", "popup", "popup", "popup", "popup", "banner", "banner", "float", "float"
+    "popup", "popup", "popup", "popup", "popup", "banner", "banner", "banner", "float", "float"
   ]);
 });
 

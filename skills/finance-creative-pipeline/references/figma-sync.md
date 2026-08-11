@@ -47,8 +47,8 @@ For each direction create a frame named `NN/type` containing:
 
 Use these sizes:
 
-- Directions 01–06: popup, 1002 × 1335.
-- Directions 07–08: banner, 1140 × 240.
+- Directions 01–05: popup, 1002 × 1335.
+- Directions 06–08: banner, 1140 × 240.
 - Directions 09–10: float, 240 × 240.
 
 Lay direction frames in two columns with 160 px gaps. Put the flattened preview on the left and the visibly reconstructed editable version on the right inside each direction frame. The two sides must not render the same flattened image.

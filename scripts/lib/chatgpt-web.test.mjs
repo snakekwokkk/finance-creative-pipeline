@@ -24,19 +24,24 @@ import {
   decompositionObservations,
   decompositionPrompt,
   embeddedLayerIds,
+  existingDecompositionConversationState,
   directionAttemptLimit,
   directionProcessingOrder,
   directionChatTitle,
   directionChatBootstrapPrompt,
+  promptSubmissionDefinitelyNotAccepted,
   promptSubmissionObserved,
   directGenerationPrompt,
   parseReferenceAudit,
   projectBaseUrl,
   readyDirectionsForFigma,
+  referenceAuditPacing,
   referenceAuditChatTitle,
   referenceAuditChatBootstrapPrompt,
   referenceAuditPrompt,
+  referenceAuditSubmissionDelayMs,
   referenceAuditSubmissionDisposition,
+  chatGptRateLimitNotice,
   reconstructedAssetPrompt,
   recordDirectionFailure,
   rejectedReferenceSourceSet,
@@ -59,6 +64,24 @@ import {
   workflowAbortedError,
   workflowAbortRequested
 } from "./chatgpt-web.mjs";
+
+test("a generated preview can enter decomposition through the shared conversation reader", async () => {
+  const response = `DECOMPOSE_START
+{"schemaVersion":4,"bboxFormat":"normalized-xywh-object","canvas":{"width":1002,"height":1335},"layers":[{"id":"title","editable":"text","bbox":{"x":0.1,"y":0.1,"width":0.3,"height":0.1}}]}
+DECOMPOSE_END`;
+  const page = {
+    url: () => "https://chatgpt.com/",
+    locator: (selector) => ({
+      allInnerTexts: async () => selector.includes('data-message-author-role="assistant"') ? [response] : [],
+      allTextContents: async () => [],
+      innerText: async () => selector === "body" ? response : "",
+      textContent: async () => selector === "body" ? response : ""
+    })
+  };
+  const state = await existingDecompositionConversationState(page);
+  assert.equal(state.recovered?.payload?.layers?.[0]?.id, "title");
+  assert.ok(state.knownKeys.size > 0);
+});
 
 test("ChatGPT login detection ignores unrelated sidebar text", () => {
   assert.equal(chatGptLoginRequired({ url: "https://chatgpt.com/", visibleLoginControls: 0 }), false);
@@ -182,6 +205,70 @@ test("prompt submission requires observable composer, message, or URL evidence",
   assert.equal(promptSubmissionObserved({ beforeUserCount: 2, afterUserCount: 2, composerText: "" }), true);
 });
 
+test("an unchanged ready composer is recoverable instead of ambiguously locked", () => {
+  const prompt = "line one\nline two";
+  assert.equal(promptSubmissionDefinitelyNotAccepted({
+    expectedPrompt: prompt,
+    composerText: "line one\nline two",
+    sendVisible: true,
+    sendEnabled: true
+  }), true);
+  assert.equal(promptSubmissionDefinitelyNotAccepted({
+    expectedPrompt: prompt,
+    composerText: "",
+    sendVisible: true,
+    sendEnabled: true
+  }), false);
+  assert.equal(promptSubmissionDefinitelyNotAccepted({
+    expectedPrompt: prompt,
+    composerText: prompt,
+    sendVisible: false,
+    sendEnabled: false
+  }), false);
+});
+
+test("reference audit pacing uses conservative defaults and accepts explicit overrides", () => {
+  assert.deepEqual(referenceAuditPacing(), {
+    domPollIntervalMs: 1_000,
+    savedConversationPollIntervalMs: 15_000,
+    submissionIntervalMs: 30_000,
+    rateLimitCooldownMs: 600_000
+  });
+  assert.deepEqual(referenceAuditPacing({
+    collection: {
+      visualReviewDomPollIntervalSeconds: 2,
+      visualReviewSavedConversationPollIntervalSeconds: 20,
+      visualReviewSubmissionIntervalSeconds: 45,
+      visualReviewRateLimitCooldownMinutes: 12
+    }
+  }), {
+    domPollIntervalMs: 2_000,
+    savedConversationPollIntervalMs: 20_000,
+    submissionIntervalMs: 45_000,
+    rateLimitCooldownMs: 720_000
+  });
+});
+
+test("reference audit submission spacing survives restarts through timestamps", () => {
+  const now = Date.parse("2026-08-11T14:00:20.000Z");
+  assert.equal(referenceAuditSubmissionDelayMs({
+    lastSubmissionAt: "2026-08-11T14:00:00.000Z",
+    now,
+    intervalMs: 30_000
+  }), 10_000);
+  assert.equal(referenceAuditSubmissionDelayMs({
+    lastSubmissionAt: "2026-08-11T13:59:00.000Z",
+    now,
+    intervalMs: 30_000
+  }), 0);
+});
+
+test("ChatGPT frequency-limit notices are recognized without matching ordinary review text", () => {
+  assert.equal(chatGptRateLimitNotice("操作太频繁，请稍后再试"), true);
+  assert.equal(chatGptRateLimitNotice("Too many requests. Try again later."), true);
+  assert.equal(chatGptRateLimitNotice("正在审核第 2 批候选图片"), false);
+});
+
 test("reference content audits live in dated-project chats and rely on image content", () => {
   assert.equal(referenceAuditChatTitle("popup"), "采集筛选-弹窗");
   assert.equal(referenceAuditChatTitle("banner"), "采集筛选-Banner");
@@ -260,18 +347,18 @@ REFERENCE_AUDIT_END`;
 });
 
 test("reference audit batches are submit-once and become passive monitors after arming", () => {
-  const current = ["p1", "p2", "p3", "p4", "p5"];
+  const current = ["p1", "p2", "p3", "p4", "p5", "p6"];
   assert.equal(referenceAuditSubmissionDisposition(current, []), "submit");
   assert.equal(referenceAuditSubmissionDisposition(current, current), "monitor");
   assert.equal(referenceAuditSubmissionDisposition(current, ["p1", "p2"]), "conflict");
-  assert.equal(referenceAuditSubmissionDisposition(current, ["old1", "old2", "old3", "old4", "old5"]), "conflict");
+  assert.equal(referenceAuditSubmissionDisposition(current, ["old1", "old2", "old3", "old4", "old5", "old6"]), "conflict");
 });
 
-test("new reference audit submissions require five candidates while legacy recovery keeps its original size", () => {
-  assert.doesNotThrow(() => assertReferenceAuditSubmissionBatchSize(5, "submit"));
+test("new reference audit submissions require six candidates while legacy recovery keeps its original size", () => {
+  assert.doesNotThrow(() => assertReferenceAuditSubmissionBatchSize(6, "submit"));
   assert.throws(
     () => assertReferenceAuditSubmissionBatchSize(1, "submit"),
-    (error) => error.code === "CHATGPT_REFERENCE_AUDIT_BATCH_SIZE" && /恰好包含 5 张/.test(error.message)
+    (error) => error.code === "CHATGPT_REFERENCE_AUDIT_BATCH_SIZE" && /恰好包含 6 张/.test(error.message)
   );
   assert.doesNotThrow(() => assertReferenceAuditSubmissionBatchSize(1, "monitor"));
 });

@@ -7,7 +7,13 @@ const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 export const pluginRoot = path.resolve(moduleDir, "../..");
 export const appSupportDir = path.join(os.homedir(), "Library", "Application Support", "Codex", "finance-creative-pipeline");
 export const configPath = path.join(appSupportDir, "config.json");
-export const REFERENCE_AUDIT_BATCH_SIZE = 5;
+export const REFERENCE_AUDIT_BATCH_SIZE = 6;
+
+const REQUIRED_DIRECTION_COUNTS = new Map([
+  ["popup", 5],
+  ["banner", 3],
+  ["float", 2]
+]);
 
 function mergeConfig(defaults, local) {
   if (Array.isArray(defaults) || Array.isArray(local)) return local === undefined ? defaults : local;
@@ -24,8 +30,18 @@ function mergeConfig(defaults, local) {
 export function migrateConfig(raw, defaults) {
   const migrated = mergeConfig(defaults, raw);
   migrated.collection ||= {};
+  migrated.collection.referenceCount = 10;
   migrated.collection.visualReviewBatchSize = REFERENCE_AUDIT_BATCH_SIZE;
-  migrated.schemaVersion = 2;
+  migrated.collection.visualReviewMaxBatchesPerType = 3;
+  if (Array.isArray(migrated.collection.searchPlans)) {
+    migrated.collection.searchPlans = migrated.collection.searchPlans.map((plan) => ({
+      ...plan,
+      count: REQUIRED_DIRECTION_COUNTS.get(plan.type) ?? plan.count
+    }));
+  }
+  migrated.generation ||= {};
+  migrated.generation.directionCount = 10;
+  migrated.schemaVersion = 5;
   return migrated;
 }
 
