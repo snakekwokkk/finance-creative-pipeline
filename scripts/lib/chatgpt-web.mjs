@@ -1188,7 +1188,10 @@ async function sendReferenceAuditPromptWithPacing({ page, prompt, state, stateFi
   }
 }
 
-async function waitForDecompositionResponse(page, knownKeys, timeout) {
+export async function waitForDecompositionResponse(page, knownKeys, timeout, {
+  pollIntervalMs = 500,
+  boundaryGraceMs = 15_000
+} = {}) {
   const started = Date.now();
   while (Date.now() - started < timeout) {
     if (page.isClosed()) throw new Error("ChatGPT 页面已关闭，无法继续等待语义分层结果");
@@ -1200,7 +1203,20 @@ async function waitForDecompositionResponse(page, knownKeys, timeout) {
       error.code = "CHATGPT_DECOMPOSITION_INVALID";
       throw error;
     }
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(pollIntervalMs);
+  }
+  const graceStarted = Date.now();
+  while (Date.now() - graceStarted < boundaryGraceMs) {
+    if (page.isClosed()) throw new Error("ChatGPT 页面已关闭，无法继续等待语义分层结果");
+    throwIfVisibleChatGptRateLimited(await visibleChatGptRateLimitNotice(page));
+    const observation = latestNewDecompositionObservation(await conversationTextSnapshots(page), knownKeys);
+    if (observation?.valid) return observation;
+    if (observation && !observation.valid) {
+      const error = new Error(`ChatGPT 已返回语义分层标记，但结果无效：${observation.error}`);
+      error.code = "CHATGPT_DECOMPOSITION_INVALID";
+      throw error;
+    }
+    await page.waitForTimeout(pollIntervalMs);
   }
   const error = new Error(`等待 ChatGPT 语义分层标记超时（${Math.round(timeout / 1000)} 秒）`);
   error.code = "CHATGPT_DECOMPOSITION_TIMEOUT";
@@ -1686,11 +1702,12 @@ async function visibleStopButton(page) {
 
 async function waitForBatchImageCandidates(page, timeout, previousSources = [], assistantBaseline = 0) {
   const started = Date.now();
+  const deadline = started + timeout + 18_000;
   const previous = new Set(previousSources);
   const candidates = new Map();
   let stableSince = null;
   let lastCount = 0;
-  while (Date.now() - started < timeout) {
+  while (Date.now() < deadline) {
     throwIfVisibleChatGptRateLimited(await visibleChatGptRateLimitNotice(page));
     const assistantMessages = page.locator('[data-message-author-role="assistant"]');
     const assistantCount = await assistantMessages.count().catch(() => assistantBaseline);
@@ -1818,8 +1835,9 @@ async function acceptDownloadedImage(page, file, src, previous, excludedFiles, t
 
 async function saveLastAssistantImage(page, file, timeout, previousSources = [], excludedFiles = [], assistantBaseline = 0) {
   const started = Date.now();
+  const deadline = started + timeout + 15_000;
   const previous = new Set(previousSources);
-  while (Date.now() - started < timeout) {
+  while (Date.now() < deadline) {
     throwIfVisibleChatGptRateLimited(await visibleChatGptRateLimitNotice(page));
     const assistantMessages = page.locator('[data-message-author-role="assistant"]');
     const assistantCount = await assistantMessages.count().catch(() => assistantBaseline);
@@ -2027,9 +2045,19 @@ export function activeDirectionFailures(manifest) {
 }
 
 export function directionProcessingOrder(count, manifest) {
-  const failed = new Set((manifest.failures || []).map((item) => item.index));
-  return Array.from({ length: count }, (_, index) => index + 1)
-    .sort((left, right) => Number(failed.has(left)) - Number(failed.has(right)) || left - right);
+  return Array.from({ length: count }, (_, index) => index + 1);
+}
+
+export function currentDirectionIncompleteError(failure, cause = null) {
+  const error = new Error(
+    `第 ${failure.index} 套尚未完整闭环，流水线已暂停且不会进入下一套：${failure.message}`,
+    cause ? { cause } : undefined
+  );
+  error.code = "CURRENT_DIRECTION_INCOMPLETE";
+  error.stage = failure.stage;
+  error.direction = failure.index;
+  error.failure = failure;
+  return error;
 }
 
 export function directionAttemptLimit(config, historicalFailure = false) {
@@ -2433,7 +2461,7 @@ export async function generateDirections({
       reference = selectDirectionReference(references, type, typeIndex);
     } catch (error) {
       const attempts = Math.max(1, Number(config.collection.maxDownloadedCandidatesPerDirection || 8));
-      recordDirectionFailure(manifest, {
+      const failure = {
         index,
         type,
         stage: "collection",
@@ -2442,10 +2470,11 @@ export async function generateDirections({
         chatUrl: null,
         chatTitle,
         failedAt: new Date().toISOString()
-      });
+      };
+      recordDirectionFailure(manifest, failure);
       await writeJsonAtomic(manifestFile, manifest);
-      console.warn(`第 ${index} 套缺少参考图，已记录并继续下一套：${error.message}`);
-      continue;
+      console.warn(`第 ${index} 套缺少参考图，已记录并暂停；不会进入下一套：${error.message}`);
+      throw currentDirectionIncompleteError(failure, error);
     }
     if (!project) {
       project = await ensureDailyProject(page, config, manifest.date || path.basename(runDir));
@@ -2693,7 +2722,8 @@ export async function generateDirections({
       };
       recordDirectionFailure(manifest, failure);
       await writeJsonAtomic(manifestFile, manifest);
-      console.error(`第 ${index} 套连续 ${failure.attempts} 次失败，已记录并继续下一套：${failure.message}`);
+      console.error(`第 ${index} 套连续 ${failure.attempts} 次失败，已记录并暂停；不会进入下一套：${failure.message}`);
+      throw currentDirectionIncompleteError(failure, lastError);
     }
   }
 

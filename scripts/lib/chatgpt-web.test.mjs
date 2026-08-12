@@ -18,6 +18,7 @@ import {
   conversationUrl,
   conversationApiImageCandidates,
   conversationApiSnapshotTexts,
+  currentDirectionIncompleteError,
   dailyProjectName,
   decompositionAttemptLimit,
   decompositionAttemptsExhausted,
@@ -62,6 +63,7 @@ import {
   selectDirectionReference,
   directionUsesRejectedReference,
   transparentAssetAttemptLimit,
+  waitForDecompositionResponse,
   workflowAbortedError,
   workflowAbortRequested
 } from "./chatgpt-web.mjs";
@@ -644,14 +646,48 @@ test("manual workflow stops are distinct from direction failures", () => {
   assert.equal(workflowAbortRequested(new Error("direction timeout"), () => false), false);
 });
 
-test("resumed runs process new directions before previously failed directions", () => {
+test("resumed runs keep strict direction order even when an earlier direction failed", () => {
   const manifest = {
     directions: [{ index: 1, status: "ready" }],
     failures: [{ index: 2, stage: "generation" }]
   };
-  assert.deepEqual(directionProcessingOrder(5, manifest), [1, 3, 4, 5, 2]);
+  assert.deepEqual(directionProcessingOrder(5, manifest), [1, 2, 3, 4, 5]);
   assert.equal(directionAttemptLimit({ generation: { maxAttempts: 2 } }), 2);
   assert.equal(directionAttemptLimit({ generation: { maxAttempts: 2 } }, true), 1);
+});
+
+test("an incomplete current direction becomes a global pause before the next direction", () => {
+  const failure = { index: 6, stage: "decomposition", message: "等待分层超时" };
+  const error = currentDirectionIncompleteError(failure);
+  assert.equal(error.code, "CURRENT_DIRECTION_INCOMPLETE");
+  assert.equal(error.direction, 6);
+  assert.match(error.message, /不会进入下一套/);
+});
+
+test("decomposition performs a boundary scan before declaring timeout", async () => {
+  const response = `DECOMPOSE_START\n{"schemaVersion":4,"bboxFormat":"normalized-xywh-object","canvas":{"width":1140,"height":240},"layers":[{"id":"title","editable":"text","bbox":{"x":0.1,"y":0.1,"width":0.3,"height":0.1}}]}\nDECOMPOSE_END`;
+  let scans = 0;
+  const page = {
+    isClosed: () => false,
+    waitForTimeout: async () => {},
+    locator: (selector) => ({
+      allInnerTexts: async () => selector.includes('data-message-author-role="assistant"')
+        ? (++scans >= 2 ? [response] : [])
+        : [],
+      allTextContents: async () => [],
+      innerText: async () => "",
+      textContent: async () => "",
+      count: async () => 0
+    }),
+    evaluate: async () => null,
+    url: () => "https://chatgpt.com/c/test"
+  };
+  const result = await waitForDecompositionResponse(page, new Set(), 0, {
+    pollIntervalMs: 1,
+    boundaryGraceMs: 50
+  });
+  assert.equal(result.payload.layers[0].id, "title");
+  assert.ok(scans >= 2);
 });
 
 test("direct preview generation keeps its bounded retry budget", async () => {

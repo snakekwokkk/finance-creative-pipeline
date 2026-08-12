@@ -309,7 +309,40 @@ try {
     }
   }
 } catch (error) {
-  if (workflowAbortRequested(error, () => Boolean(stopSignal))) {
+  if (error?.code === "CURRENT_DIRECTION_INCOMPLETE") {
+    const manifest = await readJson(path.join(runDir, "figma-manifest.json"), { directions: [], failures: [] });
+    const readyCount = (manifest.directions || []).filter((item) => item.status === "ready").length;
+    const failures = activeDirectionFailures(manifest);
+    await updateRun(runFile, {
+      status: "blocked",
+      blocker: {
+        type: "current_direction_incomplete",
+        direction: error.direction,
+        stage: error.stage,
+        message: error.message,
+        recordedAt: new Date().toISOString()
+      },
+      directionCount: readyCount,
+      directionFailures: failures,
+      activeDirection: {
+        index: error.direction,
+        stage: "blocked",
+        failureStage: error.stage,
+        message: error.message
+      },
+      stages: { collection: "complete", generation: "partial", decomposition: "partial", figma: "pending" }
+    });
+    await notify("金融运营素材流水线已暂停", error.message);
+    console.error(JSON.stringify({
+      status: "blocked",
+      reason: "current_direction_incomplete",
+      direction: error.direction,
+      stage: error.stage,
+      message: error.message,
+      runDir
+    }));
+    process.exitCode = 1;
+  } else if (workflowAbortRequested(error, () => Boolean(stopSignal))) {
     const manifest = await readJson(path.join(runDir, "figma-manifest.json"), { directions: [], failures: [] });
     const readyCount = (manifest.directions || []).filter((item) => item.status === "ready").length;
     const failures = activeDirectionFailures(manifest);
