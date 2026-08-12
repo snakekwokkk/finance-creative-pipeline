@@ -41,13 +41,19 @@ export function migrateConfig(raw, defaults) {
   }
   migrated.generation ||= {};
   migrated.generation.directionCount = 10;
+  migrated.generation.postCollectionCooldownMinutes = Number.isFinite(Number(migrated.generation.postCollectionCooldownMinutes))
+    ? Number(migrated.generation.postCollectionCooldownMinutes)
+    : 5;
   migrated.generation.directionCooldownMinutes = Number.isFinite(Number(migrated.generation.directionCooldownMinutes))
     ? Number(migrated.generation.directionCooldownMinutes)
     : 5;
+  migrated.generation.rateLimitCooldownMinutes = Number.isFinite(Number(migrated.generation.rateLimitCooldownMinutes))
+    ? Number(migrated.generation.rateLimitCooldownMinutes)
+    : Number(migrated.collection.visualReviewRateLimitCooldownMinutes || 10);
   migrated.generation.figmaCompletionPollIntervalSeconds = Number.isFinite(Number(migrated.generation.figmaCompletionPollIntervalSeconds))
     ? Number(migrated.generation.figmaCompletionPollIntervalSeconds)
     : 2;
-  migrated.schemaVersion = 7;
+  migrated.schemaVersion = 9;
   return migrated;
 }
 

@@ -11,6 +11,7 @@ import {
   batchTransparentAssetsPrompt,
   attachmentDeliveryStatus,
   chatGptLoginRequired,
+  chatGptRateLimitCooldownMs,
   chatGptSessionAuthenticated,
   chatStageMonitoringTimeout,
   chatStageSubmissionDisposition,
@@ -44,6 +45,7 @@ import {
   referenceAuditPrompt,
   referenceAuditSubmissionDelayMs,
   referenceAuditSubmissionDisposition,
+  recoverChatGptRateLimit,
   chatGptRateLimitNotice,
   reconstructedAssetPrompt,
   recordDirectionFailure,
@@ -68,6 +70,58 @@ import {
   workflowAbortedError,
   workflowAbortRequested
 } from "./chatgpt-web.mjs";
+
+test("all ChatGPT stages default to the configured ten-minute rate-limit cooldown", () => {
+  assert.equal(chatGptRateLimitCooldownMs({}), 600_000);
+  assert.equal(chatGptRateLimitCooldownMs({ collection: { visualReviewRateLimitCooldownMinutes: 4 } }), 240_000);
+  assert.equal(chatGptRateLimitCooldownMs({
+    collection: { visualReviewRateLimitCooldownMinutes: 4 },
+    generation: { rateLimitCooldownMinutes: 10 }
+  }), 600_000);
+});
+
+test("rate-limit recovery waits, refreshes the same chat, and repeats until the notice clears", async () => {
+  let now = Date.parse("2026-08-12T13:00:00.000Z");
+  const originalNow = Date.now;
+  Date.now = () => now;
+  const navigations = [];
+  const states = [];
+  let visibleChecks = 0;
+  const rateLimitNode = {
+    isVisible: async () => true,
+    innerText: async () => (++visibleChecks === 1 ? "请求过于频繁，请稍后再试" : "")
+  };
+  const emptyNode = { isVisible: async () => false, innerText: async () => "" };
+  const composerNode = { isVisible: async () => true, isEditable: async () => true };
+  const page = {
+    isClosed: () => false,
+    waitForTimeout: async (milliseconds) => { now += milliseconds; },
+    goto: async (url) => { navigations.push(url); },
+    waitForLoadState: async () => {},
+    locator: (selector) => {
+      const isComposer = selector === "#prompt-textarea";
+      return {
+        count: async () => isComposer || selector === '[role="dialog"]' ? 1 : 0,
+        nth: () => isComposer ? composerNode : selector === '[role="dialog"]' ? rateLimitNode : emptyNode
+      };
+    }
+  };
+  try {
+    const result = await recoverChatGptRateLimit({
+      page,
+      chatUrl: "https://chatgpt.com/c/original",
+      cooldownMs: 600_000,
+      notice: "请求过于频繁",
+      onState: async (state) => { states.push(state); }
+    });
+    assert.equal(result.cycle, 2);
+    assert.deepEqual(navigations, ["https://chatgpt.com/c/original", "https://chatgpt.com/c/original"]);
+    assert.deepEqual(states.map((state) => state.status), ["cooldown", "still-limited", "cooldown", "cleared"]);
+    assert.equal(now, Date.parse("2026-08-12T13:20:00.000Z"));
+  } finally {
+    Date.now = originalNow;
+  }
+});
 
 test("a generated preview can enter decomposition through the shared conversation reader", async () => {
   const response = `DECOMPOSE_START
@@ -322,8 +376,11 @@ test("reference content audits live in dated-project chats and rely on image con
   assert.doesNotMatch(prompt, /上传的候选图片|附件文件名/);
 
   const floatPrompt = referenceAuditPrompt("float", candidates);
-  assert.match(floatPrompt, /3D素材/);
-  assert.match(floatPrompt, /主体本身完整可提取/);
+  assert.match(floatPrompt, /3D图标/);
+  assert.match(floatPrompt, /小图或主体本身完整可提取/);
+  assert.match(floatPrompt, /必须具有明确金融相关视觉信号/);
+  assert.match(floatPrompt, /仅仅是3D风格或完整小图不算金融相关/);
+  assert.match(floatPrompt, /游戏、家居、社交、工具图标/);
 
   const parsed = parseReferenceAudit(`REFERENCE_AUDIT_START
 {"candidates":[{"pinId":"p1","imageAccessible":true,"typeMatch":true,"completeDesign":true,"financeRelevant":true,"structureValid":true,"usableReference":true,"score":88,"reasons":["完整金融弹窗"]},{"pinId":"p2","imageAccessible":true,"typeMatch":false,"completeDesign":false,"financeRelevant":false,"structureValid":false,"usableReference":false,"score":20,"reasons":["只是原子元素"]}]}
@@ -635,7 +692,7 @@ test("human authentication blockers stop immediately", () => {
   assert.equal(requiresUserAction(new Error("未找到 ChatGPT 输入框，当前页面状态不支持输入")), false);
 });
 
-test("ChatGPT conversation rate limits stop the workflow globally", () => {
+test("unrecovered ChatGPT conversation rate limits still stop the workflow globally", () => {
   assert.equal(requiresUserAction({ code: "CHATGPT_RATE_LIMITED", message: "请求过于频繁" }), true);
   assert.equal(requiresUserAction({ code: "FIGMA_DIRECTION_FAILED", stage: "figma", message: "质检失败" }), false);
 });

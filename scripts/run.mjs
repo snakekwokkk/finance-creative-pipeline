@@ -24,6 +24,7 @@ import {
   waitForDirectionBarrier,
   waitForFailureCooldown
 } from "./lib/direction-barrier.mjs";
+import { postCollectionCooldownWindow, waitForPostCollectionCooldown } from "./lib/generation-pacing.mjs";
 
 const testMode = process.argv.includes("--test");
 const scheduledMode = process.argv.includes("--scheduled");
@@ -176,10 +177,37 @@ try {
     console.log(JSON.stringify({ status, runDir, referenceCount: references.length, requestedCount: referenceCount }));
   } else {
     const figmaSyncState = path.join(runDir, "figma-sync-state.json");
+    const collectionCompletedAt = existingRun?.stages?.collection === "complete" && existingRun.collectionCompletedAt
+      ? existingRun.collectionCompletedAt
+      : new Date().toISOString();
+    const generationGate = postCollectionCooldownWindow(
+      collectionCompletedAt,
+      runConfig.generation.postCollectionCooldownMinutes
+    );
     await updateRun(runFile, {
-      status: "running",
+      status: "collection_cooldown",
       referenceCount: references.length,
       figmaSyncState,
+      collectionCompletedAt: generationGate.startedAt,
+      firstGenerationNotBefore: generationGate.until,
+      stages: { collection: "complete", generation: "pending", decomposition: "pending", figma: "pending" }
+    });
+    console.log(JSON.stringify({ event: "post_collection_cooldown_started", collectionCompletedAt: generationGate.startedAt, firstGenerationNotBefore: generationGate.until }));
+    await waitForPostCollectionCooldown({
+      cooldownUntil: generationGate.until,
+      pollIntervalMs: Number(runConfig.generation.figmaCompletionPollIntervalSeconds || 2) * 1_000,
+      shouldStop: () => Boolean(stopSignal) || workflowAbortRequested(),
+      onSnapshot: (snapshot) => updateRun(runFile, {
+        status: snapshot.cooldownComplete ? "running" : "collection_cooldown",
+        postCollectionCooldownComplete: snapshot.cooldownComplete,
+        postCollectionCooldownRemainingMs: snapshot.cooldownRemainingMs
+      })
+    });
+    console.log(JSON.stringify({ event: "post_collection_cooldown_complete", firstGenerationNotBefore: generationGate.until }));
+    await updateRun(runFile, {
+      status: "running",
+      postCollectionCooldownComplete: true,
+      postCollectionCooldownRemainingMs: 0,
       stages: { collection: "complete", generation: "running", decomposition: "running", figma: "pending" }
     });
     const manifest = await generateDirections({

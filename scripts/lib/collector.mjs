@@ -16,8 +16,8 @@ const POPUP_PAGE_PATTERN = /完整页面|页面设计|界面设计|首页|详情
 const BANNER_FORM_PATTERN = /banner|横幅|横版|横板|首图|头图|广告|焦点图|宣传|推广|营销|活动/i;
 const BANNER_CONTEXT_PATTERN = /金融|借款|贷款|助贷|理财|投资|基金|证券|保险|财富|资产|权益|收益|行情|股票|债券|期货|黄金|新客|会员|红包|福利/i;
 const BANNER_BLOCKED_PATTERN = /背景|底图|纹理|壁纸|边框|框架|按钮|贴纸|字体|字效|图标|icon|logo|元素|素材包|样机|模板/i;
-const FLOAT_FORM_PATTERN = /浮窗|悬浮窗|浮标|活动入口|福利入口|红包入口|悬浮入口|运营挂件|活动挂件|侧边挂件|运营贴片|活动贴片/i;
-const FLOAT_CONTEXT_PATTERN = /金融|借款|贷款|助贷|理财|投资|基金|证券|红包|福利|优惠|领券|新客|会员|任务|奖励|活动|营销/i;
+const FLOAT_FORM_PATTERN = /浮窗|悬浮窗|浮标|活动入口|福利入口|红包入口|悬浮入口|运营挂件|活动挂件|侧边挂件|运营贴片|活动贴片|3d\s*(?:金融)?图标|立体图标|小图标|小图|icon/i;
+const FLOAT_CONTEXT_PATTERN = /金融|借款|贷款|助贷|理财|投资|基金|证券|保险|财富|资产|收益|利息|费率|金额|货币|钱|金币|银行卡|红包|优惠券|领券/i;
 const FLOAT_BLOCKED_PATTERN = /背景|底图|纹理|壁纸|弥散|边框|框架|banner|横幅|海报|按钮文字|贴纸素材|(?:完整|手机|网页|app).*(?:页面|界面)|导航|菜单/i;
 const DEFAULT_SEARCH_PLANS = [
   {
@@ -40,9 +40,11 @@ const DEFAULT_SEARCH_PLANS = [
     type: "float",
     count: 2,
     keywords: [
+      "3D金融图标", "金融3D图标", "理财3D图标", "金币3D图标",
+      "红包3D图标", "优惠券3D图标", "金融小图标",
       "金融 活动浮窗", "借款 福利浮窗", "贷款 红包浮窗", "理财 活动浮标",
       "金融 权益入口", "金融 悬浮球", "借款 红包挂件", "金融 会员浮标",
-      "金融 3D素材", "金融 插图素材"
+      "金融 3D素材", "金融 插图素材", "3D图标"
     ]
   }
 ];
@@ -152,8 +154,8 @@ export function assessReferenceTitle(type, title, searchKeyword = "") {
     if (!BANNER_FORM_PATTERN.test(value)) reasons.push("标题未表明这是完整横幅、首图或营销成品");
   } else if (type === "float") {
     if (FLOAT_BLOCKED_PATTERN.test(value)) hardReasons.push("标题明确表明素材是背景、边框、原子按钮/贴纸或完整页面");
-    if (!FLOAT_FORM_PATTERN.test(value) && !FLOAT_FORM_PATTERN.test(query)) reasons.push("标题和搜索词均未表明这是浮窗、浮标、活动入口、运营挂件或活动贴片");
-    if (!FLOAT_CONTEXT_PATTERN.test(value) && !FLOAT_CONTEXT_PATTERN.test(query)) reasons.push("标题和搜索词均缺少金融或活动运营语义");
+    if (!FLOAT_FORM_PATTERN.test(value) && !FLOAT_FORM_PATTERN.test(query)) reasons.push("标题和搜索词均未表明这是浮窗、浮标、活动入口、运营挂件、小图标或活动贴片");
+    if (!FLOAT_CONTEXT_PATTERN.test(value) && !FLOAT_CONTEXT_PATTERN.test(query)) reasons.push("标题和搜索词均缺少金融相关语义，必须看图确认金融视觉信号");
   }
   const decision = hardReasons.length ? "reject" : reasons.length ? "review" : "accept";
   return { accepted: decision !== "reject", decision, reasons: [...hardReasons, ...reasons] };
@@ -302,7 +304,8 @@ export function buildSearchPlans(collection, count, date) {
   for (const plan of configured) {
     if (remaining <= 0) break;
     const target = Math.min(remaining, Math.max(0, Number(plan.count || 0)));
-    const keywords = rotateForDate([...new Set((plan.keywords || []).filter(Boolean))], date);
+    const uniqueKeywords = [...new Set((plan.keywords || []).filter(Boolean))];
+    const keywords = plan.type === "float" ? uniqueKeywords : rotateForDate(uniqueKeywords, date);
     if (!target || !keywords.length) continue;
     plans.push({ type: plan.type, count: target, keywords });
     remaining -= target;

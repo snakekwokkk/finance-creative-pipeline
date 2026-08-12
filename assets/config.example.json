@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 7,
+  "schemaVersion": 9,
   "timezone": "Asia/Shanghai",
   "chromeExecutable": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   "profileDirectory": "~/Library/Application Support/Codex/finance-creative-pipeline/chrome-profile",
@@ -45,12 +45,14 @@
       {
         "type": "float",
         "count": 2,
-        "keywords": ["金融 活动浮窗", "借款 福利浮窗", "贷款 红包浮窗", "理财 活动浮标", "金融 权益入口", "金融 悬浮球", "借款 红包挂件", "金融 会员浮标", "金融 3D素材", "金融 插图素材"]
+        "keywords": ["3D金融图标", "金融3D图标", "理财3D图标", "金币3D图标", "红包3D图标", "优惠券3D图标", "金融小图标", "金融 活动浮窗", "借款 福利浮窗", "贷款 红包浮窗", "理财 活动浮标", "金融 权益入口", "金融 悬浮球", "借款 红包挂件", "金融 会员浮标", "金融 3D素材", "金融 插图素材", "3D图标"]
       }
     ]
   },
   "generation": {
     "directionCount": 10,
+    "rateLimitCooldownMinutes": 10,
+    "postCollectionCooldownMinutes": 5,
     "directionCooldownMinutes": 5,
     "figmaCompletionPollIntervalSeconds": 2,
     "maxAttempts": 2,

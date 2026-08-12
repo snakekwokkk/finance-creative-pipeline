@@ -68,8 +68,10 @@ test("default search plan preserves type quotas", () => {
   assert.ok(plans[1].keywords.every((keyword) => /金融|理财|投资|基金|证券/.test(keyword)));
   assert.ok(plans[1].keywords.includes("金融banner"));
   assert.ok(plans[1].keywords.every((keyword) => !/弹窗|浮窗|悬浮|浮标/.test(keyword)));
-  assert.ok(plans[2].keywords.every((keyword) => /浮窗|悬浮|浮标|入口|挂件|3D素材|插图素材/.test(keyword)));
-  assert.ok(plans[2].keywords.every((keyword) => /金融|借款|贷款|理财|借贷/.test(keyword)));
+  assert.ok(plans[2].keywords.every((keyword) => /浮窗|悬浮|浮标|入口|挂件|3D素材|插图素材|图标/.test(keyword)));
+  assert.deepEqual(plans[2].keywords.slice(0, 2), ["3D金融图标", "金融3D图标"]);
+  assert.equal(plans[2].keywords.at(-1), "3D图标");
+  assert.ok(plans[2].keywords.every((keyword) => /金融|借款|贷款|理财|借贷|3D图标/.test(keyword)));
 });
 
 test("small test runs use only popup references", () => {
@@ -91,8 +93,8 @@ test("three-type validation uses one reference from each matching keyword pool",
   assert.ok(plans[1].keywords.every((keyword) => /金融|理财|投资|基金|证券/.test(keyword)));
   assert.ok(plans[1].keywords.includes("金融banner"));
   assert.ok(plans[1].keywords.every((keyword) => !/弹窗|浮窗|悬浮|浮标/.test(keyword)));
-  assert.ok(plans[2].keywords.every((keyword) => /浮窗|悬浮|浮标|入口|挂件|3D素材|插图素材/.test(keyword)));
-  assert.ok(plans[2].keywords.every((keyword) => /金融|借款|贷款|理财|借贷/.test(keyword)));
+  assert.ok(plans[2].keywords.every((keyword) => /浮窗|悬浮|浮标|入口|挂件|3D素材|插图素材|图标/.test(keyword)));
+  assert.ok(plans[2].keywords.every((keyword) => /金融|借款|贷款|理财|借贷|3D图标/.test(keyword)));
 });
 
 test("cached references are selected by type quota instead of taking the first ten", () => {
@@ -143,7 +145,7 @@ test("detail-page URL selection prefers the highest exposed Huaban rendition", (
   });
 });
 
-test("float titles allow other industries but reject atomic assets without operational signals", () => {
+test("float titles allow complete small icons and other-industry operational assets", () => {
   assert.equal(assessReferenceTitle("float", "金融新客福利活动浮窗").accepted, true);
   assert.equal(assessReferenceTitle("float", "借款红包活动入口").accepted, true);
   assert.equal(assessReferenceTitle("float", "商品零售按钮文字贴纸素材").accepted, false);
@@ -160,6 +162,8 @@ test("float titles allow other industries but reject atomic assets without opera
   assert.equal(assessReferenceTitle("float", "促销系列软3D红包+金色边元素", "借款 福利浮窗").accepted, true);
   assert.equal(assessReferenceTitle("float", "立体感炫彩会员标识", "金融 福利入口").accepted, true);
   assert.equal(assessReferenceTitle("float", "促销活动红包金币贴纸", "贷款 红包浮窗").accepted, true);
+  assert.equal(assessReferenceTitle("float", "立体礼盒小图标", "3D图标").decision, "review");
+  assert.equal(assessReferenceTitle("float", "软3D会员图标", "3D金融图标").accepted, true);
 });
 
 test("popup titles reject generic pins and atomic elements while keeping complete finance popups", () => {

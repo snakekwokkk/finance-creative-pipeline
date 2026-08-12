@@ -4,7 +4,7 @@ import { migrateConfig } from "./config.mjs";
 
 test("legacy review batches and direction quotas migrate to the current required defaults", () => {
   const defaults = {
-    schemaVersion: 6,
+    schemaVersion: 9,
     browser: { mode: "visible" },
     collection: {
       referenceCount: 10,
@@ -20,7 +20,7 @@ test("legacy review batches and direction quotas migrate to the current required
         { type: "float", count: 2, keywords: ["默认浮窗词"] }
       ]
     },
-    generation: { directionCount: 10, directionCooldownMinutes: 5, figmaCompletionPollIntervalSeconds: 2 },
+    generation: { directionCount: 10, rateLimitCooldownMinutes: 10, postCollectionCooldownMinutes: 5, directionCooldownMinutes: 5, figmaCompletionPollIntervalSeconds: 2 },
     figma: { fileKey: "YOUR_FIGMA_FILE_KEY", pageId: "0:1" }
   };
   const migrated = migrateConfig({
@@ -36,12 +36,14 @@ test("legacy review batches and direction quotas migrate to the current required
     generation: { directionCount: 8 },
     figma: { fileKey: "personal-key", pageId: "96:1056" }
   }, defaults);
-  assert.equal(migrated.schemaVersion, 7);
+  assert.equal(migrated.schemaVersion, 9);
   assert.equal(migrated.collection.referenceCount, 10);
   assert.equal(migrated.collection.visualReviewBatchSize, 6);
   assert.equal(migrated.collection.visualReviewMaxBatchesPerType, 3);
   assert.equal(migrated.generation.directionCount, 10);
+  assert.equal(migrated.generation.postCollectionCooldownMinutes, 5);
   assert.equal(migrated.generation.directionCooldownMinutes, 5);
+  assert.equal(migrated.generation.rateLimitCooldownMinutes, 10);
   assert.equal(migrated.generation.figmaCompletionPollIntervalSeconds, 2);
   assert.deepEqual(migrated.collection.searchPlans.map(({ type, count, keywords }) => ({ type, count, keywords })), [
     { type: "popup", count: 5, keywords: ["我的弹窗词"] },
@@ -58,12 +60,12 @@ test("legacy review batches and direction quotas migrate to the current required
 
 test("schema-versioned user batch overrides normalize to the required six-link batch", () => {
   const defaults = {
-    schemaVersion: 7,
+    schemaVersion: 9,
     collection: { referenceCount: 10, visualReviewBatchSize: 6, visualReviewMaxBatchesPerType: 3, searchPlans: [] },
-    generation: { directionCount: 10, directionCooldownMinutes: 5, figmaCompletionPollIntervalSeconds: 2 }
+    generation: { directionCount: 10, rateLimitCooldownMinutes: 10, postCollectionCooldownMinutes: 5, directionCooldownMinutes: 5, figmaCompletionPollIntervalSeconds: 2 }
   };
   const migrated = migrateConfig({ schemaVersion: 2, collection: { visualReviewBatchSize: 4 } }, defaults);
-  assert.equal(migrated.schemaVersion, 7);
+  assert.equal(migrated.schemaVersion, 9);
   assert.equal(migrated.collection.visualReviewBatchSize, 6);
   assert.equal(migrated.collection.visualReviewMaxBatchesPerType, 3);
 });

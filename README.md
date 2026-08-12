@@ -50,9 +50,9 @@ Finance Creative Pipeline 是一个面向中国互联网金融运营素材的 Co
 - 流水线从 `run.json` 和 `figma-manifest.json` 恢复，避免重复采集、重复生成和重复创建 Figma 日期分区。
 - `figma-manifest.json` 只由生成器写入；Figma 节点和逐方向 QA 状态独立保存在 `figma-sync-state.json`，以产物指纹防止重生成后误用旧同步结果。
 - 每次运行固定使用花瓣作为参考图来源。
-- 参考图按类型采集：弹窗、Banner、浮窗分别使用匹配的关键词池和数量配额，不混用搜索词。搜索词负责方向，尺寸和透明度负责基础过滤，ChatGPT Web 根据图片实际内容做最终判断；浮窗允许金融 3D 素材、插图、红包、金币、徽章或元素加按钮，花瓣标题只用于快速排除明确写着背景、模板、完整页面或其他行业的候选。
+- 参考图按类型采集：弹窗、Banner、浮窗分别使用匹配的关键词池和数量配额，不混用搜索词。浮窗优先搜索 `3D金融图标`，随后扩展到金融 3D 图标、理财图标、金币/红包/优惠券图标、金融小图标、活动浮窗和金融插图，通用 `3D图标` 仅作最后兜底。ChatGPT Web 根据图片实际内容做最终判断；图标小图可以没有文案或按钮，但必须从画面中看出货币、金币、银行卡、红包、收益、行情等明确金融语义。
 - 每个缺失方向最多扫描 30 个未见 Pin，每个关键词最多取 3 个候选，最多临时下载 8 张；候选按每批 6 张放入当天项目中的类型筛选聊天。图片可访问、类型匹配、设计完整且含广义运营信号时直接进入 `references/`；分数、结构和可用性只用于审计和排序，不再拥有否决权。数字、金额、`元`、`¥/$/%`、金币、优惠券、仪表盘、数据图表、趋势或上升箭头、红包、利息或息费均算合格信号，出行、电商、会员等其他行业不会因此被拒绝。
-- 弹窗和 Banner 保留默认 720px 最低宽度，Banner 继续要求宽高比至少 1.5；浮窗不使用宽度、高宽比或 Alpha 门槛，只要是可识别的金融单元素或元素加按钮即可进入看图审核。模糊标题、文件名和 `IMG_*` 不再直接淘汰。
+- 弹窗和 Banner 保留默认 720px 最低宽度，Banner 继续要求宽高比至少 1.5；浮窗不使用宽度、高宽比或 Alpha 门槛，只要是主体完整、可独立使用的图标小图、3D 图标、插画单元素或元素加按钮即可进入看图审核。模糊标题、文件名和 `IMG_*` 不再直接淘汰。
 - `reference-history.json` 长期记录已采集的花瓣 Pin，并通过 SHA-256、花瓣素材键和联合感知指纹排除同一图片；单独的 aHash 碰撞不会再淘汰不同设计，重复判定会记录匹配 Pin 和依据。
 - Figma 左侧始终是完整预览，右侧必须是可见的可编辑重建，禁止左右两边显示同一张扁平图。
 
@@ -151,11 +151,13 @@ codex plugin add finance-creative-pipeline@<marketplace-name>
 | `collection.visualReviewDomPollIntervalSeconds` | 审核等待期间本地页面文字检查间隔，默认 1 秒 |
 | `collection.visualReviewSavedConversationPollIntervalSeconds` | ChatGPT 已保存对话接口读取间隔，默认 15 秒 |
 | `collection.visualReviewSubmissionIntervalSeconds` | 审核聊天提示词的最小提交间隔，默认 30 秒 |
-| `collection.visualReviewRateLimitCooldownMinutes` | 检测到“操作太频繁”后的自动冷却时间，默认 10 分钟 |
+| `collection.visualReviewRateLimitCooldownMinutes` | 参考图审核检测到“操作太频繁”后的自动冷却时间，默认 10 分钟；冷却后刷新原聊天，提示仍在则继续下一轮冷却 |
+| `generation.rateLimitCooldownMinutes` | 生图、语义分层和透明素材检测到“操作太频繁”后的自动冷却时间，默认 10 分钟；保留提交锁并循环等待、刷新原聊天，不重复提交 |
 | `collection.maxSearchScrolls` | 为寻找未采集 Pin 执行的最大滚动次数 |
 | `collection.searchPlans` | 弹窗、Banner、浮窗各自的配额和搜索词列表 |
 | `generation.directionCount` | 原创方向数量 |
 | `generation.directionCooldownMinutes` | 每个方向拆图完成后至下一方向的最短间隔，默认 5 分钟；与当前方向 Figma 组合质检同时进行 |
+| `generation.postCollectionCooldownMinutes` | 全部参考图采集和审图完成后，提交第一条生图请求前的静默间隔，默认 5 分钟；恢复时沿用原截止时间 |
 | `generation.figmaCompletionPollIntervalSeconds` | 等待当前方向 Figma 质检结果时读取本地状态的间隔，默认 2 秒 |
 | `generation.maxAttempts` | 预览生成总尝试次数，默认 2 |
 | `generation.imageTimeoutMinutes` | 单次生图等待上限，默认 5 分钟 |
@@ -318,7 +320,7 @@ A normal run collects 10 references and generates 10 original directions: five p
 - Reference images use ChatGPT's image-specific upload input. After the expected filename, rendered thumbnail, and send-ready state are verified, the same message asks ChatGPT to understand the reference internally and directly generate the preview. The normal successful path uploads once and produces no intermediate analysis, design spec, or visible image prompt. Ordinary generation retries reuse the reference already present in the chat; re-upload occurs only when ChatGPT explicitly reports the reference missing.
 - Resume from `run.json` and `figma-manifest.json` to avoid duplicate collection, generation, or dated Figma sections.
 - Use Huaban as the sole reference provider for every run.
-- Collect popup, Banner, and floating references from separate type-matched keyword pools. Queries establish discovery direction, technical checks enforce dimensions where applicable, and ChatGPT Web makes the final decision from actual image content. Floating references may be standalone finance 3D assets, illustrations, red envelopes, coins, badges, or an asset-plus-button composition. Titles only hard-reject candidates that explicitly describe backgrounds, templates, full pages, or atomic elements, never merely another industry.
+- Collect popup, Banner, and floating references from separate type-matched keyword pools. Float discovery starts with `3D金融图标`, broadens through finance 3D/small icons, coin/red-envelope/coupon icons, floating entries, and finance illustrations, and keeps generic `3D图标` only as the final fallback. ChatGPT Web makes the final decision from actual image content. A complete icon-sized image may omit copy or buttons, but it must visibly express finance through currency, coins, bank cards, red envelopes, returns, market data, or similar signals.
 - For each missing direction, scan up to 30 unseen Pins, rotate after at most three candidates per query, and resolve fresh public main-image URLs from the locally authenticated Huaban detail page. Review exactly six URLs per new batch in the dated project's type-specific audit chat. Accept every accessible, type-matched, complete design with any broad operational signal; score, structure, and usability remain audit metadata and cannot veto acceptance. Arabic numerals, explicit amounts, `元`, `¥/$/%`, coins, coupons, dashboards, data charts, trend or upward arrows, red envelopes, and interest or fee wording all qualify. Travel, ecommerce, membership, dining, utility, and other-industry references remain valid when those conditions pass.
 - Popup and Banner references retain the 720 px minimum-width gate, and Banners retain an aspect ratio of at least 1.5. Floating references have no width, aspect-ratio, or Alpha gate at collection time; opaque standalone subjects proceed to later ChatGPT transparent extraction. Ambiguous titles, filenames, and `IMG_*` labels proceed to image-content review instead of being rejected.
 - Keep Huaban Pin IDs and strong image fingerprints in `reference-history.json` to avoid collecting the same image again. Exact hashes, stable Huaban asset keys, or combined aHash and 256-bit dHash fingerprints may reject a duplicate; aHash plus aspect ratio alone may not.
@@ -413,11 +415,13 @@ User configuration lives outside the repository and should never be committed:
 | `collection.visualReviewDomPollIntervalSeconds` | Local rendered-text polling interval while waiting; defaults to 1 second |
 | `collection.visualReviewSavedConversationPollIntervalSeconds` | Saved-conversation API polling interval; defaults to 15 seconds |
 | `collection.visualReviewSubmissionIntervalSeconds` | Minimum spacing between audit-chat prompt submissions; defaults to 30 seconds |
-| `collection.visualReviewRateLimitCooldownMinutes` | Automatic cooldown after a visible frequency-limit notice; defaults to 10 minutes |
+| `collection.visualReviewRateLimitCooldownMinutes` | Automatic cooldown for reference-audit frequency limits; defaults to 10 minutes and repeats after refreshing the same chat while the notice remains |
+| `generation.rateLimitCooldownMinutes` | Automatic cooldown for generation, decomposition, and transparent-asset frequency limits; defaults to 10 minutes and preserves the submit-once lock while refreshing the same chat |
 | `collection.maxSearchScrolls` | Maximum scroll attempts used to find unseen Pins |
 | `collection.searchPlans` | Type-specific quotas and queries for popup, Banner, and floating references |
 | `generation.directionCount` | Number of original directions |
 | `generation.directionCooldownMinutes` | Minimum interval after one direction finishes decomposition; defaults to 5 minutes and overlaps its Figma reconstruction and QA |
+| `generation.postCollectionCooldownMinutes` | Idle interval after all collection and review complete and before the first generation request; defaults to 5 minutes and resumes from the persisted deadline |
 | `generation.figmaCompletionPollIntervalSeconds` | Local-state polling interval while waiting for the current direction's Figma QA; defaults to 2 seconds |
 | `generation.maxAttempts` | Total preview-generation attempts; defaults to 2 |
 | `generation.imageTimeoutMinutes` | Maximum wait per image-generation attempt; defaults to 5 minutes |
