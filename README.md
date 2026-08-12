@@ -22,28 +22,28 @@ Finance Creative Pipeline 是一个面向中国互联网金融运营素材的 Co
 
 1. 使用持久化 Chrome 从花瓣详情页采集高分辨率可见参考图，并保留来源链接和尺寸信息。
 2. 将每个方向的参考图只上传一次，让 ChatGPT 网页版在内部理解后直接生成一张品牌中性的完整预览图，不输出中间分析或提示词。
-3. 每天创建或复用一个日期项目，每个方向只使用一个项目内聊天；该方向的生图、语义拆图和必要的复杂框架补全都在同一聊天完成。
+3. 每天创建或复用一个日期项目，每个方向只使用一个项目内聊天；该方向的生图、语义拆图和一次批量透明素材请求都在同一聊天完成。
 4. 在同一聊天中直接要求 ChatGPT 基于刚生成的预览图识别复杂视觉元素并生成语义化 `layers.json`，不重复上传预览图。
-5. 按 95% 原生还原阈值优先从完整预览的源像素提取复杂视觉；大面积框架包含文字或按钮、无法直接分离时，由 ChatGPT 去字并补全遮挡区域。
-6. 每个方向完成后立即进入独立 Figma 队列；上一方向写入和核验 Figma 时，下一方向可继续在 ChatGPT 生图和拆图。
+5. 将所有不可原生重建的复杂视觉合并为一次正式请求，要求 ChatGPT 分别返回独立、已有透明通道且不含可编辑文字或简单结构的 PNG；本地只验证，不裁剪、不抠图、不修复 Alpha。
+6. 每个方向拆图完成后立即启动 5 分钟冷却和该方向的 Figma 重建/QA；只有两者均完成后，仍在运行的同一进程才自动开始下一方向。
 
-默认正式运行会采集 10 张参考图并生成 10 个原创方向：6 个弹窗、2 个 Banner、2 个浮窗，每个方向使用 1 张同类型参考图。
+默认正式运行会采集 10 张参考图并生成 10 个原创方向：5 个弹窗、3 个 Banner、2 个浮窗，每个方向使用 1 张同类型参考图。
 
 ### 核心原则
 
 - 图片生成必须使用 ChatGPT 网页版，不以 Codex 图片生成作为替代。
-- 每个方向生成一张完整预览图；不可原生重建的复杂素材从预览源像素分别提取为独立 PNG，不生成多元素素材板。
+- 每个方向生成一张完整预览图；所有不可原生重建的复杂素材在同一条批量请求中声明，但 ChatGPT 必须把每个素材分别返回为独立透明 PNG，不生成精灵图或多元素素材板。
 - 弹窗方向只生成弹窗本体与干净的外部安全留白，不生成 App 页面、搜索栏、导航栏、底部 Tab、页面卡片或虚化界面背景。
-- 以 95% 原生还原阈值决定拆图；复杂主视觉、3D物体、人物、吉祥物、复杂卡片框架、阴影、玻璃、纹理、渐变折面、立体徽章、红包外壳和复杂插画低于阈值时保留为去字位图底板，只有能达到 95% 的简单卡片、按钮、普通图标、图表和装饰才由 Figma 原生重构。
+- 所有文字、数字、金额、单位和 CTA 文案必须是 Figma 原生文本；普通功能图标使用 Remix Icon；背景、卡片、红包或信封背板、按钮、矩形、边框、分隔线、简单渐变和简单阴影必须原生重建。只有人物、吉祥物、复杂 3D 主体、独特插画、复杂飘带和特殊立体徽章等真正不可重建的视觉才使用位图。
 - `preview.png` 是 Figma 复原的唯一视觉真值。所有图层按归一化 bbox 精确换算坐标和尺寸；素材画布内部禁止 Auto Layout，不允许手工近似摆放、重新居中或优化间距。
 - Figma 完成状态必须附带原尺寸 Editable 导出、实际几何回读、50% 叠图、差分热图和通过的 QA 报告。视觉相似度不得低于 95%，并同时满足位置、尺寸、文字基线、素材完整性和结构门槛；仅做左右截图对比不能通过。
 - 普通功能图标优先从 [Remix Icon](https://remixicon.com/) 匹配官方 SVG，并以可编辑矢量导入 Figma；不再手绘临时图标或使用无语义占位形状。
 - 参考图用于确定主视觉类别、材质气质、颜色关系和信息层级；可保留相近的金融主体（如红包或相近权益材质），同时重设计具体造型细节、文案和局部排布，避免完整照搬。
-- 透明素材优先使用本地背景差分从最终预览中直接抠取。大面积复杂框架包含多个内部图层时，才在同一聊天中让 ChatGPT 去字并补全；报告会明确区分源像素与 GPT 补全素材。视觉上连成一体的复杂主视觉仍作为一个整体。
+- 透明素材只接受 ChatGPT 在同一方向聊天中一次批量生成的独立透明 PNG。禁止从完整预览裁切元素，也禁止本地背景差分、抠图、去背景、透明边裁切或 Alpha 修复；视觉上连成一体的复杂主视觉保持为一个素材，空间上独立的复杂视觉分别返回。
 - 拆图回复以最新完整且非空的 `DECOMPOSE_START` / `DECOMPOSE_END` 标记 JSON 为完成信号，不依赖单一消息选择器或停止按钮。恢复与重试前先扫描已有聊天，发现完整结果就立即保存，不重复提交。
-- 采集审核只提交花瓣当日新鲜的公开图片直链，每批固定 5 个；ChatGPT 必须实际打开图片并返回 `imageAccessible: true` 才可通过。回复以当前批次 Pin ID 完全匹配的 `REFERENCE_AUDIT_START` / `REFERENCE_AUDIT_END` 标记 JSON 为完成信号。页面文字默认每秒本地检查一次，已保存对话接口最多每 15 秒读取一次，审核提示词至少间隔 30 秒；若出现“操作太频繁”，当前批次会落盘并自动冷却 10 分钟，再从同一聊天继续监听。只有输入框和提示明确证明原点击被拒绝时，冷却后才允许重试一次。审核通过后才下载原图并进行像素、哈希和重复性校验。
-- 本地只裁掉透明空白并执行 Alpha 与边界质量检查，不会推断前景蒙版。
-- 紧裁或贴边的小素材会保留并记录警告，不再仅因主体占比高而丢弃。空图、无法获得可用 Alpha 或没有可恢复主体的素材仍会被拒绝；单个失败不会阻止后续素材，部分成功方向可以继续。
+- 采集审核只提交花瓣当日新鲜的公开图片直链，每批固定 6 个；ChatGPT 必须实际打开图片并返回 `imageAccessible: true` 才可通过。回复以当前批次 Pin ID 完全匹配的 `REFERENCE_AUDIT_START` / `REFERENCE_AUDIT_END` 标记 JSON 为完成信号。页面文字默认每秒本地检查一次，已保存对话接口最多每 15 秒读取一次，审核提示词至少间隔 30 秒；若出现“操作太频繁”，当前批次会落盘并自动冷却 10 分钟，再从同一聊天继续监听。只有输入框和提示明确证明原点击被拒绝时，冷却后才允许重试一次。审核通过后才下载原图并进行像素、哈希和重复性校验。
+- 本地只验证尺寸、Alpha、前景比例、透明比例和文件重复性，不修改 ChatGPT 返回的像素。
+- 空白、不透明或重复输出会被拒绝。ChatGPT 返回少于请求数量时，保留全部有效素材并将报告记为 `partial`，不逐元素追问或修复；缺少关键素材导致明显空洞时，最终 Figma QA 仍会失败。
 - 每个运行日期只使用一个名为 `金融运营素材 YYYY-MM-DD` 的 ChatGPT 项目。候选内容审核聊天 `采集筛选-弹窗/Banner/浮窗` 和正式方向聊天都保存在该日期项目内；每个设计方向仍只使用一个聊天完成直接生图和拆图。
 - 项目内聊天会显式命名为 `弹窗1` 至 `弹窗5`、`Banner1` 至 `Banner3`、`浮窗1` 至 `浮窗2`；编号在各素材类型内独立计算，验证运行中的每个类型从 1 开始。
 - 参考图使用 ChatGPT 图片专用上传控件；只有该方向 1 张附件的文件名、缩略图和发送状态全部验证通过后，才在同一条消息中要求 ChatGPT 内部理解参考图并直接生图。正常成功路径只上传 1 次，不请求中间分析、设计规格或可见提示词；普通生图重试复用聊天中的参考图，只有 ChatGPT 明确表示未收到图片时才重新上传。
@@ -189,9 +189,9 @@ codex plugin add finance-creative-pipeline@<marketplace-name>
 | `complete` | Figma 同步和视觉核验完成 |
 | `blocked` | 需要用户处理登录、验证码、权限或其他外部阻塞 |
 
-恢复任务时先读取已有 `run.json`、`figma-manifest.json` 和 `figma-sync-state.json`。运行器每拆完一个方向就输出 `direction_ready`，并从拆图完成时刻启动5分钟计时；Codex 立即组合并质检当前方向。只有当前方向通过 Figma QA 且5分钟已经到期，运行器才开始下一方向。等待期间复用并保持同一个 Chrome，不执行下一方向的 ChatGPT 操作。如果本地阶段已经完成，只排空尚未通过 QA 的 Figma 方向，不要重新运行采集和生成。
+恢复任务时先读取已有 `run.json`、`figma-manifest.json` 和 `figma-sync-state.json`。运行器每拆完一个方向就输出 `direction_ready`，并从拆图完成时刻启动 5 分钟计时；Codex 立即组合并质检当前方向。只有当前方向通过 Figma QA 且 5 分钟已经到期，仍在运行的同一进程才开始下一方向。等待期间复用并保持同一个 Chrome，不执行下一方向的 ChatGPT 操作。若运行进程或浏览器已经退出，它不会在 5 分钟后自行重启；人工续跑会沿用已记录的截止时间，而不是重新计时。如果本地阶段已经完成，只排空尚未通过 QA 的 Figma 方向，不要重新运行采集和生成。
 
-参考采集先执行内容审核：每个新审核批次固定 6 张，每种素材类型最多 3 批、即 18 张；三批后未凑满目标数量时保留已通过的参考图并直接转入下一类型。每批在防重复提交锁下最多处理两次。直接预览生成、语义分层和逐素材透明 PNG 提取分别拥有独立的两次尝试，每次等待最多 5 分钟。最终失败方向保留在 `figma-manifest.json.failures`；只要存在完整 `ready` 方向，仍进入 `awaiting_figma` 并继续同步成功方向。登录失效、验证码、安全验证和权限问题会立即停止并通知用户。
+参考采集先执行内容审核：每个新审核批次固定 6 张，每种素材类型最多 3 批、即 18 张；三批后未凑满目标数量时保留已通过的参考图并直接转入下一类型。每批在防重复提交锁下最多处理两次。预览生成和语义分层各自保留独立尝试预算；透明素材每个方向只允许一次正式批量提交，不进行逐元素重试或修复对话。最终失败方向保留在 `figma-manifest.json.failures`；只要存在完整 `ready` 方向，仍进入 `awaiting_figma` 并继续同步成功方向。登录失效、验证码、安全验证、权限问题或对话访问限流会立即停止并通知用户。
 
 ### 输出结构
 
@@ -219,8 +219,8 @@ YYYY-MM-DD/
 - `preview.png`：完整、扁平化的最终预览。
 - `spec.json`：仅用于兼容旧版运行；新方向不再生成中间设计规格。
 - `layers.json`：ChatGPT 输出的语义图层计划。
-- `decomposition-report.json`：每个独立素材的 Alpha、边界质量、警告和限制。
-- `layers/*.png`：通过质量检查的源像素素材或明确标记来源的 GPT 去字补全素材。
+- `decomposition-report.json`：批量透明素材的接收状态、Alpha 质量、警告和限制。
+- `layers/*.png`：ChatGPT 分别生成、已有透明通道且通过本地验证的独立素材。
 - `figma-sync-state.json`：独立的逐方向 Figma 队列状态、产物指纹、Section/Frame 节点 ID、上传数和视觉 QA 结果。
 
 ### Figma 交付规范
@@ -230,7 +230,7 @@ YYYY-MM-DD/
 - `Preview`：左侧完整预览图。
 - `Editable`：右侧可见的可编辑重建。
 - `Visual Base`：锁定但隐藏，只作为核对参考，不能作为右侧可见交付。
-- `Editable Elements`：通过检查的源像素/GPT 补全透明素材、原生文字、卡片、按钮和简单几何图层；保留 raster 已包含的图层会通过 `suppressesLayerIds` 跳过，避免重复。
+- `Editable Elements`：通过检查的 ChatGPT 批量透明素材，以及原生文字、Remix Icon 矢量、卡片、按钮、背板和简单几何图层。
 
 弹窗右侧画布保持透明，只重构弹窗卡片、阴影、贴附主视觉和卡内元素，不还原弹窗后方的页面界面。Banner 和浮窗从 `layers.json` 的背景图层读取原生背景；旧版方向可使用 `spec.json.palette` 作为补充回退。Figma 完成前必须逐方向截图，并检查：
 
@@ -249,7 +249,7 @@ npm run figma-sync-progress -- inspect --date YYYY-MM-DD
 npm run figma-sync-progress -- section --date YYYY-MM-DD --section-id NODE_ID
 npm run figma-sync-progress -- start --date YYYY-MM-DD --direction 1
 npm run figma-sync-progress -- node --date YYYY-MM-DD --direction 1 --node-id NODE_ID
-npm run figma-sync-progress -- complete --date YYYY-MM-DD --direction 1 --uploaded-assets 3
+npm run figma-sync-progress -- complete --date YYYY-MM-DD --direction 1 --uploaded-assets 3 --qa-report /absolute/path/to/figma-qa-report.json
 npm run mark-figma-complete -- --date YYYY-MM-DD
 ```
 
@@ -449,7 +449,7 @@ Primary states:
 | `complete` | Figma sync and visual verification are complete |
 | `blocked` | Login, CAPTCHA, permissions, or another external issue requires user action |
 
-Always inspect `run.json`, `figma-manifest.json`, and `figma-sync-state.json` before resuming. Each decomposed direction emits `direction_ready` and starts its five-minute timer. Reconstruct and verify that direction in Figma during the timer; the runtime keeps the same Chrome session idle and starts the next direction only after both Figma QA and the timer are complete. If local generation is already complete, drain only the remaining Figma queue.
+Always inspect `run.json`, `figma-manifest.json`, and `figma-sync-state.json` before resuming. Each decomposed direction emits `direction_ready` and starts its five-minute timer. Reconstruct and verify that direction in Figma during the timer; the still-running process keeps the same Chrome session idle and starts the next direction only after both Figma QA and the timer are complete. If the process or browser exits, it does not relaunch itself after five minutes. A manual resume reuses the persisted deadline instead of restarting the timer. If local generation is already complete, drain only the remaining Figma queue.
 
 Reference collection submits fresh public image URLs in new batches of exactly six, with at most three batches or 18 candidates per creative type. After the third batch, it keeps whatever approved references were found and continues to the next type instead of filling the nominal quota indefinitely. Content-audit batches retain two handling attempts under the submit-once recovery lock. Preview generation and semantic decomposition retain their independent attempt budgets; transparent assets use one formal batch submission per direction with no per-element repair turns. Remaining failures stay in `figma-manifest.json.failures`, while valid `ready` directions continue to Figma. Login expiry, CAPTCHA, security checks, and permission issues still stop immediately and notify the user.
 
