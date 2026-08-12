@@ -1,13 +1,13 @@
 import fs from "node:fs/promises";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import sharp from "sharp";
 import { readJson, writeJsonAtomic } from "./state.mjs";
 import { screenshotFailure } from "./browser.mjs";
 import { REFERENCE_AUDIT_BATCH_SIZE } from "./config.mjs";
 import {
+  acceptBatchGeneratedTransparentAsset,
   assignAssetIndices,
-  extractReconstructedAsset,
-  extractSourcePixelAsset,
   isRasterAsset,
   recoverAcceptedAsset,
   reportAssetsReady,
@@ -1632,6 +1632,143 @@ async function downloadConversationApiImage(page, candidate, file) {
   return false;
 }
 
+async function downloadVisibleImageSource(page, src, file) {
+  if (src?.startsWith("data:")) {
+    await fs.writeFile(file, Buffer.from(src.slice(src.indexOf(",") + 1), "base64"));
+    return validImageFile(file);
+  }
+  if (src?.startsWith("blob:")) {
+    const base64 = await page.evaluate(async (url) => {
+      const blob = await fetch(url).then((response) => response.blob());
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      let binary = "";
+      for (let offset = 0; offset < bytes.length; offset += 32_768) {
+        binary += String.fromCharCode(...bytes.subarray(offset, offset + 32_768));
+      }
+      return btoa(binary);
+    }, src).catch(() => null);
+    if (!base64) return false;
+    await fs.writeFile(file, Buffer.from(base64, "base64"));
+    return validImageFile(file);
+  }
+  if (!src) return false;
+  const inPage = await page.evaluate(async (url) => {
+    try {
+      const response = await fetch(url, { credentials: "include" });
+      if (!response.ok) return null;
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      let binary = "";
+      for (let offset = 0; offset < bytes.length; offset += 32_768) {
+        binary += String.fromCharCode(...bytes.subarray(offset, offset + 32_768));
+      }
+      return btoa(binary);
+    } catch {
+      return null;
+    }
+  }, src).catch(() => null);
+  if (inPage) {
+    await fs.writeFile(file, Buffer.from(inPage, "base64"));
+    return validImageFile(file);
+  }
+  const response = await page.context().request.get(src, { timeout: 120_000 }).catch(() => null);
+  if (!response?.ok()) return false;
+  await fs.writeFile(file, await response.body());
+  return validImageFile(file);
+}
+
+async function visibleStopButton(page) {
+  const stop = page.locator('[data-testid="stop-button"]');
+  for (let index = 0; index < await stop.count(); index += 1) {
+    if (await stop.nth(index).isVisible().catch(() => false)) return true;
+  }
+  return false;
+}
+
+async function waitForBatchImageCandidates(page, timeout, previousSources = [], assistantBaseline = 0) {
+  const started = Date.now();
+  const previous = new Set(previousSources);
+  const candidates = new Map();
+  let stableSince = null;
+  let lastCount = 0;
+  while (Date.now() - started < timeout) {
+    throwIfVisibleChatGptRateLimited(await visibleChatGptRateLimitNotice(page));
+    const assistantMessages = page.locator('[data-message-author-role="assistant"]');
+    const assistantCount = await assistantMessages.count().catch(() => assistantBaseline);
+    for (let index = assistantCount - 1; index >= assistantBaseline; index -= 1) {
+      const text = await assistantMessages.nth(index).innerText().catch(() => "");
+      if (/图片生成失败|无法完成这张图|image generation failed|unable to (complete|generate) (this|the) image/i.test(text)) {
+        const error = new Error("ChatGPT 明确报告批量素材生成失败");
+        error.code = "CHATGPT_IMAGE_GENERATION_FAILED";
+        throw error;
+      }
+    }
+    for (const candidate of await conversationApiImages(page)) {
+      if (!previous.has(candidate.key)) candidates.set(candidate.key, { ...candidate, sourceType: "saved" });
+    }
+    for (const src of await visibleImageSources(page)) {
+      if (!previous.has(src) && !candidates.has(src)) candidates.set(src, { key: src, src, sourceType: "visible" });
+    }
+    if (candidates.size !== lastCount) {
+      lastCount = candidates.size;
+      stableSince = null;
+    }
+    if (candidates.size > 0 && !await visibleStopButton(page)) {
+      stableSince ||= Date.now();
+      if (Date.now() - stableSince >= 15_000) return [...candidates.values()];
+    } else {
+      stableSince = null;
+    }
+    await page.waitForTimeout(3_000);
+  }
+  if (candidates.size) return [...candidates.values()];
+  throw new Error("等待 ChatGPT 批量生成透明素材超时");
+}
+
+async function collectBatchTransparentAssets({
+  page,
+  layers,
+  outputDir,
+  timeout,
+  previousSources,
+  assistantBaseline,
+  thresholds
+}) {
+  const rasterLayers = layers.filter(isRasterAsset).sort((left, right) => left.assetIndex - right.assetIndex);
+  const candidates = await waitForBatchImageCandidates(page, timeout, previousSources, assistantBaseline);
+  const results = new Map();
+  const uniqueCandidates = [];
+  const downloadedHashes = new Set();
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidate = candidates[index];
+    const candidateFile = path.join(outputDir, `.candidate-batch-download-${String(index + 1).padStart(2, "0")}.png`);
+    await fs.rm(candidateFile, { force: true });
+    const downloaded = candidate.sourceType === "saved"
+      ? await downloadConversationApiImage(page, candidate, candidateFile)
+      : await downloadVisibleImageSource(page, candidate.src, candidateFile);
+    if (!downloaded) continue;
+    const hash = createHash("sha256").update(await fs.readFile(candidateFile)).digest("hex");
+    if (downloadedHashes.has(hash)) {
+      await fs.rm(candidateFile, { force: true });
+      continue;
+    }
+    downloadedHashes.add(hash);
+    uniqueCandidates.push({ file: candidateFile, hash });
+  }
+  for (let index = 0; index < rasterLayers.length; index += 1) {
+    const layer = rasterLayers[index];
+    const candidate = uniqueCandidates[index];
+    if (!candidate) {
+      results.set(layer.id, { status: "rejected", engine: "chatgpt-batch-transparent", reason: "ChatGPT 本次批量返回未包含该素材" });
+      continue;
+    }
+    const result = await acceptBatchGeneratedTransparentAsset({ candidateFile: candidate.file, layer, outputDir, thresholds });
+    await fs.rm(candidate.file, { force: true });
+    results.set(layer.id, result);
+  }
+  await Promise.all(uniqueCandidates.slice(rasterLayers.length).map((candidate) => fs.rm(candidate.file, { force: true })));
+  return { results, returnedCount: uniqueCandidates.length };
+}
+
 async function waitForImageGenerationToSettle(page, timeout) {
   const stop = page.locator('[data-testid="stop-button"]');
   if (await stop.count()) {
@@ -1788,7 +1925,13 @@ export function decompositionPrompt(index, width, height, maxAssets, type) {
   const floatRule = type === "float"
     ? "\n\n这是浮窗/单元素方向。只输出参考图中的独立金融主体及可选按钮，不要补出完整页面、长海报或环境背景；一个 3D 素材、插图、红包、金币、徽章或‘元素+按钮’也可以作为完整方向。"
     : "";
-  return `直接分析当前对话中刚生成的第${index}套完整运营预览图（${width}x${height}），无需上传或重新上传该图，输出供 Figma 按像素坐标复原的图层 JSON。逐层输出背景、卡片、按钮、文字、图标、装饰和主视觉。Preview 是唯一视觉真值，不要重新排版或优化间距。视觉上连成一体、共同构成一个主视觉的复杂对象必须合并为一个 raster 组，例如“盾牌+箭头+基座+附属金币”或“红包+挂件+贴附飘带”；不要把同一主视觉拆成多个会错位的零件。只有空间上彼此独立、可单独移动的复杂视觉才分成不同 raster。每层 bbox 必须使用无歧义对象 {x,y,width,height}，四个值均为0到1，严格对应当前预览中的左上角和宽高；禁止数组 bbox，禁止使用 w/h 别名。每个 raster 的 bbox 必须紧贴完整主体并留约 3% 安全边距，且不得包含文字。每层提供 zIndex、confidence、visualImpact（critical、supporting或minor）和 nativeFidelity（用 Figma 基础图形和文字重建的预计完成度）；移除后会留下明显空洞、破坏阅读或改变构图的图层必须标为 critical。${popupRule}${floatRule}\n\neditable只能是background、raster、vector或text。nativeFidelity < 0.95，或对象包含复杂卡片框架、阴影、玻璃、纹理、3D 材质、渐变折面、立体徽章、复杂插图、独特主视觉时，editable 必须为 raster；nativeFidelity >= 0.95 且确实是简单几何、普通功能图标、文字或纯色按钮时才用 vector/text。复杂弹窗框架应作为去除文字和按钮后的完整 raster 底板，避免在 Figma 中用普通矩形近似材质。最多 ${maxAssets} 个 raster，每个复杂主视觉组必须有唯一 id 和 assetPrompt。每个普通功能图标使用kind=icon，并增加icon对象：query用2到4个简短英文词准确描述图标语义，style只可为line或fill，color使用原图十六进制颜色。\n\n只输出以下标记包裹的合法JSON，不要解释。严格只用三行：第一行DECOMPOSE_START，第二行是完整的单行紧凑JSON，第三行DECOMPOSE_END。JSON内部不得换行或缩进，不要使用Markdown代码块。\nDECOMPOSE_START\n{"schemaVersion":4,"bboxFormat":"normalized-xywh-object","canvas":{"width":${width},"height":${height}},"layers":[]}\nDECOMPOSE_END\n\n必须把识别出的完整 layers 数组填入 JSON；不要改写文字，不要猜看不清的内容，不要输出蒙版或多边形。`;
+  return `直接分析当前对话中刚生成的第${index}套完整运营预览图（${width}x${height}），无需上传或重新上传该图，输出供 Figma 按像素坐标复原的图层 JSON。逐层输出背景、卡片、按钮、文字、图标、装饰和主视觉。Preview 是唯一视觉真值，不要重新排版或优化间距。所有文字、数字、金额、单位和按钮文案必须为 text，绝对不能包含在 raster 中。普通功能图标必须为 vector 且 kind=icon，供 Figma 使用 Remix Icon。背景、圆角矩形、卡片、红包或信封的简单结构背板、按钮底板、描边、分割线、简单渐变和简单阴影必须为 background/vector，由 Figma 原生重绘，禁止为了保留外观将整个结构归为 raster。只有人物、吉祥物、复杂3D主体、独特插画、复杂丝带彩带、特殊立体徽章或其他无法原生重建的独特视觉才可为 raster。共同构成一个主视觉的复杂对象必须合并为一个 raster 组；空间上独立、可单独移动的复杂对象分为不同 raster。每层 bbox 必须使用无歧义对象 {x,y,width,height}，四个值均为0到1；每个 raster 不得包含文字、按钮、卡片或简单背板。每层提供 zIndex、confidence、visualImpact 和 nativeFidelity。${popupRule}${floatRule}\n\neditable只能是background、raster、vector或text。最多 ${maxAssets} 个 raster，每个 raster 必须有唯一 id 和 assetPrompt。每个普通功能图标使用kind=icon，并增加icon对象：query用2到4个简短英文词准确描述图标语义，style只可为line或fill，color使用原图十六进制颜色。\n\n只输出以下标记包裹的合法JSON，不要解释。严格只用三行：第一行DECOMPOSE_START，第二行是完整的单行紧凑JSON，第三行DECOMPOSE_END。JSON内部不得换行或缩进，不要使用Markdown代码块。\nDECOMPOSE_START\n{"schemaVersion":4,"bboxFormat":"normalized-xywh-object","canvas":{"width":${width},"height":${height}},"layers":[]}\nDECOMPOSE_END\n\n必须把识别出的完整 layers 数组填入 JSON；不要改写文字，不要猜看不清的内容，不要输出蒙版或多边形。`;
+}
+
+export function batchTransparentAssetsPrompt(layers) {
+  const assets = (layers || []).filter(isRasterAsset).sort((a, b) => a.assetIndex - b.assetIndex);
+  const list = assets.map((layer, index) => `ASSET_${String(index + 1).padStart(2, "0")}：${layer.assetPrompt || layer.role || layer.id}`).join("\n");
+  return `基于当前对话中的完整预览图，一次性分别生成并返回以下 ${assets.length} 张独立透明 PNG 图片：\n${list}\n\n硬性要求：每个 ASSET 必须是一张独立图片，不是拼图、网格或素材板；按 ASSET_01 起的顺序返回。每张图片只包含对应的复杂主体，背景必须原生透明，主体完整且不裁边，并使用可用的最高分辨率。不得包含任何文字、数字、金额、按钮、卡片、简单矩形背板、普通功能图标或其他 ASSET。保持与完整预览一致的造型、颜色、材质、光影和观察角度。不要解释，不要返回JSON，直接生成多张独立图片。`;
 }
 
 function normalizedLayerBox(layer) {
@@ -1898,6 +2041,8 @@ export function directionAttemptLimit(config, historicalFailure = false) {
 
 export function requiresUserAction(error) {
   return error?.code === "CHATGPT_RATE_LIMITED"
+    || error?.code === "FIGMA_DIRECTION_FAILED"
+    || error?.code === "DIRECTION_BARRIER_FAILED"
     || /登录|log in|验证码|captcha|安全验证|security check|WAF|权限|permission|access denied|访问被阻止/i
     .test(String(error?.message || error));
 }
@@ -1941,10 +2086,7 @@ export function decompositionAttemptLimit(config, historicalFailure = false) {
 }
 
 export function transparentAssetAttemptLimit(config, historicalFailure = false) {
-  if (historicalFailure) return 1;
-  const assetConfig = config?.transparentAssets || {};
-  const configured = Number(assetConfig.maxAttempts ?? (Number(assetConfig.maxCorrectionAttempts ?? 1) + 1));
-  return Math.max(1, Number.isFinite(configured) ? Math.floor(configured) : 2);
+  return 1;
 }
 
 export function decompositionAttemptsExhausted(error, attempts) {
@@ -2022,7 +2164,6 @@ export async function decomposePreview(
   const attempts = limits.decompositionAttempts ?? decompositionAttemptLimit(config);
   const timeout = minuteTimeout(decompositionTimeout);
   const assetTimeout = minuteTimeout(assetConfig.timeoutMinutes ?? 5);
-  const assetAttempts = limits.transparentAssetAttempts ?? transparentAssetAttemptLimit(config);
   let layers = cached?.schemaVersion >= 4 && cached?.layers?.length ? cached : null;
   let knownDecompositionKeys = null;
   const assetResults = new Map();
@@ -2087,7 +2228,8 @@ export async function decomposePreview(
   }
   await writeJsonAtomic(layersFile, layers);
   await fs.mkdir(outputDir, { recursive: true });
-  const reusableAssets = cachedReport?.schemaVersion >= 4;
+  const reusableAssets = cachedReport?.schemaVersion >= 5
+    && cachedReport?.strategy === "editable-native-plus-chatgpt-batch-transparent";
   const previousAssets = new Map((cachedReport?.layers || [])
     .filter((layer) => layer.asset?.status === "accepted")
     .map((layer) => [layer.id, layer.asset]));
@@ -2099,163 +2241,63 @@ export async function decomposePreview(
     ))
     .map((entry) => fs.rm(path.join(outputDir, entry.name), { force: true })));
 
-  const reconstructionLimit = Math.max(0, Number(assetConfig.maxReconstructedAssets ?? 2));
-  let reconstructionCount = 0;
-  for (const layer of layers.layers.filter(isRasterAsset).sort((left, right) => left.assetIndex - right.assetIndex)) {
-    const embeddedIds = embeddedLayerIds(layers.layers, layer);
-    const embeddedLayers = layers.layers.filter((item) => embeddedIds.includes(item.id));
-    let sourceResult = assetResults.get(layer.id)
-      || (!force && reusableAssets && await recoverAcceptedAsset({
-        layer,
-        outputDir,
-        thresholds: assetConfig,
-        previousAsset: previousAssets.get(layer.id)
-      }));
-    if (!sourceResult || sourceResult.engine === "chatgpt-reconstructed-matting") {
-      if (sourceResult?.status === "accepted") {
-        assetResults.set(layer.id, sourceResult);
-        continue;
-      }
-      sourceResult = await extractSourcePixelAsset({ sourceImage: previewFile, layer, outputDir, thresholds: assetConfig });
+  const rasterLayers = layers.layers.filter(isRasterAsset).sort((left, right) => left.assetIndex - right.assetIndex);
+  for (const layer of rasterLayers) {
+    if (force || !reusableAssets) continue;
+    const recovered = await recoverAcceptedAsset({
+      layer,
+      outputDir,
+      thresholds: assetConfig,
+      previousAsset: previousAssets.get(layer.id)
+    });
+    if (recovered?.engine === "chatgpt-batch-transparent") assetResults.set(layer.id, recovered);
+  }
+  const missingRasterLayers = rasterLayers.filter((layer) => !assetResults.has(layer.id));
+  if (missingRasterLayers.length) {
+    const stageKey = "batch-transparent-assets";
+    const prompt = batchTransparentAssetsPrompt(missingRasterLayers);
+    const promptKey = `${stageKey}:${previewStat.size}:${Math.floor(previewStat.mtimeMs)}:${missingRasterLayers.map((layer) => layer.id).join(",")}`;
+    const stageState = await readChatStageState(chatStageStateFile);
+    const stageRecord = stageState.stages[stageKey] || null;
+    const disposition = chatStageSubmissionDisposition(stageRecord, promptKey);
+    if (disposition === "conflict") {
+      const error = new Error("当前方向仍有另一条未完成的批量素材请求，禁止再次提交");
+      error.code = "CHATGPT_STAGE_PENDING_CONFLICT";
+      throw error;
     }
-
-    const requiresReconstruction = rasterNeedsReconstruction(layer, layers.layers, assetConfig);
-    const canReconstruct = reconstructionCount < reconstructionLimit
-      && (sourceResult.status !== "accepted" || requiresReconstruction);
-    let result = sourceResult;
-    if (canReconstruct) {
-      reconstructionCount += 1;
-      let sourceFallbackFile = null;
-      if (sourceResult.status === "accepted" && sourceResult.file) {
-        sourceFallbackFile = path.join(outputDir, `source-${path.basename(sourceResult.file)}`);
-        await fs.copyFile(sourceResult.file, sourceFallbackFile).catch(() => {});
-      }
-      try {
-        result = await runTransparentAssetAttempts({
-          attempts: assetAttempts,
-          layer,
-          recover: async ({ attempt, lastError }) => recoverConversation({ attempt, lastError }),
-          operation: async ({ attempt, lastError }) => {
-            const attemptStartedAt = Date.now();
-            const candidateFile = path.join(outputDir, `.candidate-reconstructed-${layer.assetIndex + 1}.png`);
-            await fs.rm(candidateFile, { force: true });
-            const hasConfirmedRejectedAsset = Boolean(lastError?.assetResult);
-            const prompt = hasConfirmedRejectedAsset
-              ? `${reconstructedAssetPrompt(layer, embeddedLayers)}\n\n上一次结果未通过：${lastError.assetResult.reason || lastError.message || "素材不完整"}。请扩大留白并确保只保留目标主体。`
-              : reconstructedAssetPrompt(layer, embeddedLayers);
-            const stageKey = `reconstruction:${layer.id}`;
-            const promptKey = `${stageKey}:${previewStat.size}:${Math.floor(previewStat.mtimeMs)}:${hasConfirmedRejectedAsset ? `correction-${attempt}` : "initial"}`;
-            const stageState = await readChatStageState(chatStageStateFile);
-            const stageRecord = stageState.stages[stageKey] || null;
-            const disposition = chatStageSubmissionDisposition(stageRecord, promptKey);
-            if (disposition === "conflict") {
-              const error = new Error(`透明素材 ${layer.id} 仍有未完成的 GPT 图片请求，禁止发送修正提示`);
-              error.code = "CHATGPT_STAGE_PENDING_CONFLICT";
-              throw error;
-            }
-            const previousSources = disposition === "monitor"
-              ? (stageRecord.previousSources || [])
-              : await imageSourceSnapshot(page);
-            const assistantBaseline = disposition === "monitor"
-              ? Number(stageRecord.assistantBaseline || 0)
-              : await page.locator('[data-message-author-role="assistant"]').count();
-            const submission = await submitChatStagePromptOnce({
-              page,
-              stateFile: chatStageStateFile,
-              stageKey,
-              promptKey,
-              prompt,
-              metadata: { previousSources, assistantBaseline, layerId: layer.id }
-            });
-            try {
-              await saveLastAssistantImage(
-                page,
-                candidateFile,
-                Math.min(
-                  remainingAttemptTimeout(attemptStartedAt, assetTimeout),
-                  chatStageMonitoringTimeout(submission.record, assetTimeout)
-                ),
-                previousSources,
-                [previewFile],
-                assistantBaseline
-              );
-            } catch (error) {
-              if (error?.code === "CHATGPT_IMAGE_GENERATION_FAILED") {
-                await setChatStageStatus(chatStageStateFile, stageKey, {
-                  promptKey,
-                  status: "failed-confirmed",
-                  failure: error.message
-                });
-              }
-              throw error;
-            }
-            await onConversationReady();
-            const candidateResult = await extractReconstructedAsset({
-              candidateFile,
-              layer,
-              outputDir,
-              thresholds: assetConfig
-            });
-            if (candidateResult.status === "accepted") {
-              await fs.rm(candidateFile, { force: true });
-              await setChatStageStatus(chatStageStateFile, stageKey, {
-                promptKey,
-                status: "completed",
-                completedAt: new Date().toISOString(),
-                outputFile: candidateResult.file
-              });
-              return {
-                ...candidateResult,
-                sourceFallbackFile,
-                reconstructionReason: sourceResult.status === "accepted"
-                  ? "源像素素材包含内部可编辑图层，需要去字并补全遮挡"
-                  : sourceResult.reason
-              };
-            }
-            const rejectedFile = path.join(outputDir, `rejected-reconstructed-${String(layer.assetIndex + 1).padStart(2, "0")}-attempt-${attempt}.png`);
-            await fs.rename(candidateFile, rejectedFile).catch(() => {});
-            await setChatStageStatus(chatStageStateFile, stageKey, {
-              promptKey,
-              status: "rejected-confirmed",
-              rejectedAt: new Date().toISOString(),
-              rejectedFile,
-              rejectionReason: candidateResult.reason
-            });
-            const rejected = new Error(candidateResult.reason);
-            rejected.assetResult = { ...candidateResult, rejectedFile };
-            throw rejected;
-          },
-          onFailure: async ({ attempt, error }) => {
-            console.error(`第 ${index} 套 GPT 补全素材 ${layer.id} 第 ${attempt}/${assetAttempts} 次失败：${error.message}`);
-            await screenshotFailure(page, path.join(directionDir, `asset-${String(layer.assetIndex + 1).padStart(2, "0")}-error-attempt-${attempt}.png`));
-          }
-        });
-      } catch (error) {
-        if (sourceResult.status === "accepted") {
-          result = {
-            ...sourceResult,
-            sourceFallbackFile,
-            suppressesLayerIds: embeddedIds,
-            warnings: [
-              ...(sourceResult.warnings || []),
-              `GPT 去字补全未完成，保留源像素整体：${error.message}`
-            ]
-          };
-        } else {
-          result = error.assetResult || { status: "rejected", reason: error.message };
-        }
-      }
-    } else if (sourceResult.status === "accepted" && embeddedIds.length) {
-      result = {
-        ...sourceResult,
-        suppressesLayerIds: embeddedIds,
-        warnings: [
-          ...(sourceResult.warnings || []),
-          "紧裁素材保留了内部内容，Figma 重构时跳过重复图层"
-        ]
-      };
-    }
-    assetResults.set(layer.id, result);
+    const previousSources = disposition === "monitor"
+      ? (stageRecord.previousSources || [])
+      : await imageSourceSnapshot(page);
+    const assistantBaseline = disposition === "monitor"
+      ? Number(stageRecord.assistantBaseline || 0)
+      : await page.locator('[data-message-author-role="assistant"]').count();
+    const submission = await submitChatStagePromptOnce({
+      page,
+      stateFile: chatStageStateFile,
+      stageKey,
+      promptKey,
+      prompt,
+      metadata: { previousSources, assistantBaseline, layerIds: missingRasterLayers.map((layer) => layer.id) }
+    });
+    const collected = await collectBatchTransparentAssets({
+      page,
+      layers: missingRasterLayers,
+      outputDir,
+      timeout: Math.min(assetTimeout, chatStageMonitoringTimeout(submission.record, assetTimeout)),
+      previousSources,
+      assistantBaseline,
+      thresholds: assetConfig
+    });
+    for (const [layerId, result] of collected.results) assetResults.set(layerId, result);
+    await setChatStageStatus(chatStageStateFile, stageKey, {
+      promptKey,
+      status: "completed",
+      completedAt: new Date().toISOString(),
+      requestedCount: missingRasterLayers.length,
+      returnedCount: collected.returnedCount,
+      acceptedCount: [...collected.results.values()].filter((result) => result.status === "accepted").length
+    });
+    await onConversationReady();
   }
   const report = await writeDecompositionReport({
     plan: layers,
@@ -2266,7 +2308,7 @@ export async function decomposePreview(
   if (report.status === "rejected") {
     const error = new Error(`没有任何复杂透明素材可用：${report.warnings.join("；") || "全部素材均未通过"}`);
     error.stage = "transparent_assets";
-    error.attempts = assetAttempts;
+    error.attempts = 1;
     throw error;
   }
   return layers;
@@ -2312,7 +2354,8 @@ export async function generateDirections({
         readyCount: manifest.directions.filter((item) => item.status === "ready").length
       });
     } catch (error) {
-      console.warn(`第 ${direction.index} 套 ready 事件记录失败，方向产物仍保留：${error.message}`);
+      error.code ||= "DIRECTION_BARRIER_FAILED";
+      throw error;
     }
   };
   manifest.directionChats ||= {};
@@ -2366,6 +2409,11 @@ export async function generateDirections({
       && existingLayers.layers?.length
       && await validImageFile(existing.previewFile || path.join(directionDir, "preview.png"))
       && await reportAssetsReady(existingReport)) {
+      if (!existing.decompositionCompletedAt) {
+        const reportStat = await fs.stat(existing.decompositionReport || path.join(directionDir, "layers", "decomposition-report.json"));
+        existing.decompositionCompletedAt = reportStat.mtime.toISOString();
+        await writeJsonAtomic(manifestFile, manifest);
+      }
       await emitDirectionReady(existing);
       continue;
     }
@@ -2610,6 +2658,7 @@ export async function generateDirections({
 
       const entry = {
         index, status: "ready", type, contentScope: type === "popup" ? "popup-only" : "full-canvas", ...size, previewFile,
+        decompositionCompletedAt: new Date().toISOString(),
         ...(legacySpec ? { specFile } : {}),
         layersFile: path.join(directionDir, "layers.json"),
         decompositionReport: path.join(directionDir, "layers", "decomposition-report.json"),

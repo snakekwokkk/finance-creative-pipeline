@@ -5,11 +5,13 @@ import sharp from "sharp";
 
 export const TRANSPARENT_ASSET_ENGINE = "native-source-pixel-matting";
 export const RECONSTRUCTED_ASSET_ENGINE = "chatgpt-reconstructed-matting";
+export const BATCH_GENERATED_ASSET_ENGINE = "chatgpt-batch-transparent";
 export const HYBRID_ASSET_ENGINE = "hybrid-source-and-chatgpt-matting";
 
 const supportedAssetEngines = new Set([
   TRANSPARENT_ASSET_ENGINE,
-  RECONSTRUCTED_ASSET_ENGINE
+  RECONSTRUCTED_ASSET_ENGINE,
+  BATCH_GENERATED_ASSET_ENGINE
 ]);
 
 export function isRasterAsset(layer) {
@@ -18,8 +20,28 @@ export function isRasterAsset(layer) {
     && layer?.editable !== "background";
 }
 
+export function enforceEditableLayerPolicy(plan) {
+  const layers = (plan?.layers || []).map((layer) => {
+    const kind = String(layer?.kind || "").toLowerCase();
+    const role = String(layer?.role || layer?.id || "").toLowerCase();
+    if (kind === "text" || layer?.text != null || /copy|title|subtitle|headline|amount|label|caption|文字|文案|金额/.test(role)) {
+      return { ...layer, kind: "text", editable: "text" };
+    }
+    if (kind === "icon" || layer?.icon || /(^|\/)icon([/_]|$)|功能图标/.test(role)) {
+      return { ...layer, kind: "icon", editable: "vector" };
+    }
+    if (["background", "card", "panel", "surface", "button", "rectangle", "rect", "divider", "line"].includes(kind)
+      || /background|card|panel|surface|button|backplate|divider|背景|背板|卡片|按钮底板|分割线/.test(role)) {
+      return { ...layer, editable: kind === "background" ? "background" : "vector" };
+    }
+    return layer;
+  });
+  return { ...plan, layers };
+}
+
 export function assignAssetIndices(plan, maxAssets = 8) {
-  const sourceLayers = Array.isArray(plan?.layers) ? plan.layers : [];
+  const normalizedPlan = enforceEditableLayerPolicy(plan);
+  const sourceLayers = Array.isArray(normalizedPlan?.layers) ? normalizedPlan.layers : [];
   const rasterLayers = sourceLayers.filter(isRasterAsset);
   if (rasterLayers.length > maxAssets) {
     throw new Error(`ChatGPT 识别出 ${rasterLayers.length} 个复杂透明素材，超过单方向上限 ${maxAssets}`);
@@ -36,7 +58,7 @@ export function assignAssetIndices(plan, maxAssets = 8) {
     return assigned;
   });
   return {
-    ...plan,
+    ...normalizedPlan,
     schemaVersion: 4,
     transparentAssets: {
       engine: TRANSPARENT_ASSET_ENGINE,
@@ -183,6 +205,48 @@ export async function validateSeparateAsset({ candidateFile, layer, outputDir, t
     engine: TRANSPARENT_ASSET_ENGINE,
     quality: warnings.length ? "tight-crop" : "clean",
     warnings,
+    metrics,
+    thresholds: limits,
+    file: path.resolve(outputFile),
+    intrinsicPx: { width: metadata.width, height: metadata.height }
+  };
+}
+
+export async function acceptBatchGeneratedTransparentAsset({ candidateFile, layer, outputDir, thresholds = {} }) {
+  const limits = {
+    minForegroundRatio: thresholds.minForegroundRatio ?? 0.005,
+    minTransparentRatio: thresholds.minTransparentRatio ?? 0.18
+  };
+  const metrics = await alphaMetrics(candidateFile);
+  if (!metrics.hasAlpha || metrics.transparentRatio < limits.minTransparentRatio) {
+    return {
+      status: "rejected",
+      engine: BATCH_GENERATED_ASSET_ENGINE,
+      metrics,
+      thresholds: limits,
+      reason: "ChatGPT 返回的素材不是有效透明 PNG；禁止本地抠图修复"
+    };
+  }
+  if (metrics.foregroundRatio < limits.minForegroundRatio) {
+    return {
+      status: "rejected",
+      engine: BATCH_GENERATED_ASSET_ENGINE,
+      metrics,
+      thresholds: limits,
+      reason: "ChatGPT 返回的透明 PNG 为空或主体过小"
+    };
+  }
+  await fs.mkdir(outputDir, { recursive: true });
+  const outputFile = separateAssetFile(outputDir, layer);
+  await fs.copyFile(candidateFile, outputFile);
+  const metadata = await sharp(outputFile).metadata();
+  return {
+    status: "accepted",
+    engine: BATCH_GENERATED_ASSET_ENGINE,
+    sourcePixelExact: false,
+    generatedByChatGpt: true,
+    batchGenerated: true,
+    quality: "native-transparent",
     metrics,
     thresholds: limits,
     file: path.resolve(outputFile),
@@ -350,7 +414,7 @@ export async function recoverAcceptedAsset({ layer, outputDir, thresholds = {}, 
       status: "accepted",
       engine: supportedAssetEngines.has(previousAsset?.engine) ? previousAsset.engine : TRANSPARENT_ASSET_ENGINE,
       recovered: true,
-      sourcePixelExact: previousAsset?.engine === RECONSTRUCTED_ASSET_ENGINE ? false : true,
+      sourcePixelExact: [RECONSTRUCTED_ASSET_ENGINE, BATCH_GENERATED_ASSET_ENGINE].includes(previousAsset?.engine) ? false : true,
       file: path.resolve(file),
       intrinsicPx: { width: metadata.width, height: metadata.height }
     };
@@ -397,9 +461,11 @@ export async function writeDecompositionReport({ plan, sourceImage, outputDir, a
       align: "center",
       preserveAspectRatio: true
     };
-    record.extractionMode = record.asset.engine === RECONSTRUCTED_ASSET_ENGINE
-      ? "chatgpt-reconstructed-asset"
-      : "native-source-pixel-asset";
+    record.extractionMode = record.asset.engine === BATCH_GENERATED_ASSET_ENGINE
+      ? "chatgpt-generated-transparent-asset"
+      : record.asset.engine === RECONSTRUCTED_ASSET_ENGINE
+        ? "chatgpt-reconstructed-asset"
+        : "native-source-pixel-asset";
     return record;
   });
   const rejectedCount = layers.filter((layer) => layer.extractionMode === "transparent-asset-rejected").length;
@@ -416,7 +482,8 @@ export async function writeDecompositionReport({ plan, sourceImage, outputDir, a
       ? "partial"
       : "rejected";
   const report = {
-    schemaVersion: 4,
+    schemaVersion: 5,
+    strategy: "editable-native-plus-chatgpt-batch-transparent",
     status,
     sourceImage: path.resolve(sourceImage),
     canvas: { width: canvasWidth, height: canvasHeight },
@@ -434,9 +501,9 @@ export async function writeDecompositionReport({ plan, sourceImage, outputDir, a
         : "transparent-assets-rejected",
     warnings,
     limitations: [
-      "优先通过本地背景分离保留完整预览中的源像素；无法去字或补全遮挡时可由同一 ChatGPT 对话重建，并在 asset.engine 中明确标记",
-      "只有无法用 Figma 基础图形可靠重建的复杂视觉才应生成透明 PNG",
-      "紧裁或贴边的小素材允许保留并记录警告；部分素材失败不再丢弃同方向的其他可用素材"
+      "文字必须保持 Figma 可编辑，普通功能图标必须使用 Remix Icon，简单背板和按钮必须由 Figma 原生重绘",
+      "只有无法用 Figma 基础图形可靠重建的独特复杂视觉才通过一次 ChatGPT 批量请求生成独立透明 PNG",
+      "禁止从完整预览裁切或本地抠图；批量返回少于声明素材数时保留有效结果并将方向标记为 partial"
     ]
   };
   await fs.writeFile(path.join(outputDir, "decomposition-report.json"), `${JSON.stringify(report, null, 2)}\n`, "utf8");
@@ -444,9 +511,10 @@ export async function writeDecompositionReport({ plan, sourceImage, outputDir, a
 }
 
 export async function reportAssetsReady(report) {
-  if (report?.schemaVersion < 4 || !["ready", "partial"].includes(report?.status)) return false;
+  if (report?.schemaVersion < 5 || report?.strategy !== "editable-native-plus-chatgpt-batch-transparent"
+    || !["ready", "partial"].includes(report?.status)) return false;
   const accepted = (report.layers || [])
-    .filter((layer) => ["native-source-pixel-asset", "chatgpt-reconstructed-asset"].includes(layer.extractionMode));
+    .filter((layer) => ["native-source-pixel-asset", "chatgpt-reconstructed-asset", "chatgpt-generated-transparent-asset"].includes(layer.extractionMode));
   if (report.status === "partial" && !accepted.length) return false;
   if (accepted.some((layer) => !supportedAssetEngines.has(layer.asset?.engine))) return false;
   const files = accepted.map((layer) => layer.file);

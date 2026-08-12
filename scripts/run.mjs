@@ -17,6 +17,8 @@ import {
 import { appendError, ensureRun, readJson, updateRun, writeJsonAtomic } from "./lib/state.mjs";
 import { notify } from "./lib/notify.mjs";
 import { acquireWorkflowLock } from "./lib/workflow-lock.mjs";
+import { directionArtifactRevision } from "./lib/figma-sync-state.mjs";
+import { directionCooldownWindow, waitForDirectionBarrier } from "./lib/direction-barrier.mjs";
 
 const testMode = process.argv.includes("--test");
 const scheduledMode = process.argv.includes("--scheduled");
@@ -186,10 +188,23 @@ try {
     initialProject: dailyProject,
     onProjectReady: (chatgptProject) => updateRun(runFile, { chatgptProject }),
     onDirectionReady: async ({ direction, manifestFile, readyCount }) => {
+      const revision = await directionArtifactRevision(direction);
+      const cooldown = directionCooldownWindow(
+        direction.decompositionCompletedAt,
+        runConfig.generation.directionCooldownMinutes
+      );
       await updateRun(runFile, {
         readyDirectionCount: readyCount,
         figmaManifest: manifestFile,
-        figmaSyncState
+        figmaSyncState,
+        activeDirection: {
+          index: direction.index,
+          type: direction.type,
+          stage: "awaiting_figma_and_cooldown",
+          decompositionCompletedAt: cooldown.startedAt,
+          cooldownUntil: cooldown.until,
+          revision
+        }
       });
       console.log(JSON.stringify({
         event: "direction_ready",
@@ -197,8 +212,57 @@ try {
         manifest: manifestFile,
         figmaSyncState,
         direction: { index: direction.index, type: direction.type, status: direction.status },
-        readyCount
+        readyCount,
+        decompositionCompletedAt: cooldown.startedAt,
+        cooldownUntil: cooldown.until
       }));
+      await waitForDirectionBarrier({
+        stateFile: figmaSyncState,
+        directionIndex: direction.index,
+        revision,
+        cooldownUntil: cooldown.until,
+        pollIntervalMs: Number(runConfig.generation.figmaCompletionPollIntervalSeconds || 2) * 1_000,
+        shouldStop: () => Boolean(stopSignal) || chatgpt?.isClosed(),
+        onSnapshot: async (snapshot) => {
+          await updateRun(runFile, {
+            activeDirection: {
+              index: direction.index,
+              type: direction.type,
+              stage: snapshot.complete
+                ? "closed"
+                : snapshot.cooldownComplete
+                  ? "awaiting_figma"
+                  : snapshot.figmaComplete
+                    ? "cooldown"
+                    : "awaiting_figma_and_cooldown",
+              decompositionCompletedAt: cooldown.startedAt,
+              cooldownUntil: cooldown.until,
+              cooldownComplete: snapshot.cooldownComplete,
+              figmaComplete: snapshot.figmaComplete,
+              figmaStatus: snapshot.figmaStatus,
+              revision
+            }
+          });
+          console.log(JSON.stringify({
+            event: "direction_barrier",
+            direction: direction.index,
+            cooldownUntil: cooldown.until,
+            ...snapshot
+          }));
+        }
+      });
+      await updateRun(runFile, {
+        activeDirection: {
+          index: direction.index,
+          type: direction.type,
+          stage: "closed",
+          decompositionCompletedAt: cooldown.startedAt,
+          cooldownUntil: cooldown.until,
+          closedAt: new Date().toISOString(),
+          revision
+        }
+      });
+      console.log(JSON.stringify({ event: "direction_closed", direction: direction.index }));
     },
     shouldStop: () => Boolean(stopSignal)
   });

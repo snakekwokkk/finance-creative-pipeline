@@ -8,6 +8,7 @@ import {
   activeDirectionFailures,
   assertReferenceAuditSubmissionBatchSize,
   assistantReportsMissingReferenceImages,
+  batchTransparentAssetsPrompt,
   attachmentDeliveryStatus,
   chatGptLoginRequired,
   chatGptSessionAuthenticated,
@@ -506,10 +507,23 @@ test("decomposition records searchable Remix Icon semantics instead of invented 
   const layersPrompt = decompositionPrompt(7, 1140, 240, 4, "banner");
   assert.match(layersPrompt, /每个普通功能图标使用kind=icon/);
   assert.match(layersPrompt, /Preview 是唯一视觉真值/);
-  assert.match(layersPrompt, /nativeFidelity < 0\.95/);
+  assert.match(layersPrompt, /所有文字、数字、金额、单位和按钮文案必须为 text/);
+  assert.match(layersPrompt, /红包或信封的简单结构背板/);
   assert.match(layersPrompt, /bbox 必须使用无歧义对象 \{x,y,width,height\}/);
   assert.match(layersPrompt, /共同构成一个主视觉的复杂对象必须合并为一个 raster 组/);
-  assert.match(layersPrompt, /不要把同一主视觉拆成多个会错位的零件/);
+  assert.match(layersPrompt, /共同构成一个主视觉的复杂对象必须合并为一个 raster 组/);
+});
+
+test("one decomposition asset prompt requests multiple separate transparent images", () => {
+  const prompt = batchTransparentAssetsPrompt([
+    { id: "left-ribbon", role: "Decoration/LeftRibbon", editable: "raster", assetIndex: 0, assetPrompt: "左侧彩带" },
+    { id: "heart", role: "Decoration/Heart", editable: "raster", assetIndex: 1, assetPrompt: "爱心徽章" }
+  ]);
+  assert.match(prompt, /一次性分别生成并返回以下 2 张独立透明 PNG/);
+  assert.match(prompt, /ASSET_01：左侧彩带/);
+  assert.match(prompt, /ASSET_02：爱心徽章/);
+  assert.match(prompt, /不是拼图、网格或素材板/);
+  assert.match(prompt, /背景必须原生透明/);
 });
 
 test("decomposition asks ChatGPT to keep machine JSON visually compact", () => {
@@ -528,7 +542,8 @@ test("decomposition marker listener finds completed JSON and ignores the prompt 
 {"schemaVersion":4,"canvas":{"width":1002,"height":1335},"layers":[]}
 DECOMPOSE_END`;
   const firstPayload = {
-    schemaVersion: 4,
+    schemaVersion: 5,
+    strategy: "editable-native-plus-chatgpt-batch-transparent",
     canvas: { width: 1002, height: 1335 },
     layers: [{ id: "title", kind: "text", editable: "text", text: "限时权益" }]
   };
@@ -704,8 +719,8 @@ test("exhausted decomposition attempts are stage-specific and do not consume gen
   assert.equal(error.attempts, 2);
 });
 
-test("transparent assets have their own two-attempt budget", async () => {
-  assert.equal(transparentAssetAttemptLimit({}), 2);
+test("transparent asset generation is configured for one formal batch submission", async () => {
+  assert.equal(transparentAssetAttemptLimit({}), 1);
   assert.equal(transparentAssetAttemptLimit({ transparentAssets: { maxAttempts: 2 } }, true), 1);
   let operations = 0;
   const result = await runTransparentAssetAttempts({
@@ -741,7 +756,8 @@ test("Figma handoff includes only ready directions with complete local artifacts
     .toFile(previewFile);
   await fs.writeFile(layersFile, JSON.stringify({ schemaVersion: 4, layers: [{ id: "title", editable: "text" }] }));
   await fs.writeFile(decompositionReport, JSON.stringify({
-    schemaVersion: 4,
+    schemaVersion: 5,
+    strategy: "editable-native-plus-chatgpt-batch-transparent",
     status: "ready",
     transparentAssets: { engine: "native-source-pixel-matting" },
     layers: []

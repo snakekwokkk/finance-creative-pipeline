@@ -41,7 +41,13 @@ export function migrateConfig(raw, defaults) {
   }
   migrated.generation ||= {};
   migrated.generation.directionCount = 10;
-  migrated.schemaVersion = 5;
+  migrated.generation.directionCooldownMinutes = Number.isFinite(Number(migrated.generation.directionCooldownMinutes))
+    ? Number(migrated.generation.directionCooldownMinutes)
+    : 5;
+  migrated.generation.figmaCompletionPollIntervalSeconds = Number.isFinite(Number(migrated.generation.figmaCompletionPollIntervalSeconds))
+    ? Number(migrated.generation.figmaCompletionPollIntervalSeconds)
+    : 2;
+  migrated.schemaVersion = 7;
   return migrated;
 }
 

@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 5,
+  "schemaVersion": 7,
   "timezone": "Asia/Shanghai",
   "chromeExecutable": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   "profileDirectory": "~/Library/Application Support/Codex/finance-creative-pipeline/chrome-profile",
@@ -51,6 +51,8 @@
   },
   "generation": {
     "directionCount": 10,
+    "directionCooldownMinutes": 5,
+    "figmaCompletionPollIntervalSeconds": 2,
     "maxAttempts": 2,
     "brandNeutral": true,
     "decompositionTimeoutMinutes": 5,
@@ -59,15 +61,8 @@
   },
   "transparentAssets": {
     "maxAssets": 8,
-    "maxReconstructedAssets": 2,
     "timeoutMinutes": 5,
-    "maxAttempts": 2,
-    "allowTightCrop": true,
-    "reconstructionAreaThreshold": 0.22,
-    "reconstructionEmbeddedLayerCount": 2,
     "minForegroundRatio": 0.005,
-    "maxForegroundRatio": 0.82,
-    "minTransparentRatio": 0.18,
-    "maxBorderForegroundRatio": 0.02
+    "minTransparentRatio": 0.18
   }
 }

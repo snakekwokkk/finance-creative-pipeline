@@ -155,6 +155,8 @@ codex plugin add finance-creative-pipeline@<marketplace-name>
 | `collection.maxSearchScrolls` | 为寻找未采集 Pin 执行的最大滚动次数 |
 | `collection.searchPlans` | 弹窗、Banner、浮窗各自的配额和搜索词列表 |
 | `generation.directionCount` | 原创方向数量 |
+| `generation.directionCooldownMinutes` | 每个方向拆图完成后至下一方向的最短间隔，默认 5 分钟；与当前方向 Figma 组合质检同时进行 |
+| `generation.figmaCompletionPollIntervalSeconds` | 等待当前方向 Figma 质检结果时读取本地状态的间隔，默认 2 秒 |
 | `generation.maxAttempts` | 预览生成总尝试次数，默认 2 |
 | `generation.imageTimeoutMinutes` | 单次生图等待上限，默认 5 分钟 |
 | `generation.decompositionTimeoutMinutes` | 语义分层单次等待上限，默认 5 分钟 |
@@ -162,15 +164,9 @@ codex plugin add finance-creative-pipeline@<marketplace-name>
 | `chatgpt.dailyProjects` | 是否每天创建或复用一个 ChatGPT 日期项目，默认开启 |
 | `chatgpt.projectNamePrefix` | 日期项目前缀，默认 `金融运营素材` |
 | `transparentAssets.maxAssets` | 单方向最多拆出的复杂视觉素材数，默认 8 |
-| `transparentAssets.maxReconstructedAssets` | 单方向最多由 ChatGPT 去字补全的复杂框架数，默认 2 |
-| `transparentAssets.allowTightCrop` | 是否保留主体占比高或贴边的小素材并记录警告，默认开启 |
-| `transparentAssets.reconstructionAreaThreshold` | 触发大面积复合框架补全的归一化面积阈值，默认 0.22 |
-| `transparentAssets.timeoutMinutes` | 第 9 步每个独立素材单次等待上限，默认 5 分钟 |
-| `transparentAssets.maxAttempts` | 第 9 步每个独立素材总尝试次数，默认 2 |
+| `transparentAssets.timeoutMinutes` | 单次批量透明素材请求的等待上限，默认 5 分钟 |
 | `transparentAssets.minForegroundRatio` | 单素材最小前景占比 |
-| `transparentAssets.maxForegroundRatio` | 单素材最大前景占比 |
 | `transparentAssets.minTransparentRatio` | 单素材最小透明像素占比 |
-| `transparentAssets.maxBorderForegroundRatio` | 图片边界允许的最大前景占比 |
 
 完整示例见 [`assets/config.example.json`](assets/config.example.json)。
 
@@ -186,14 +182,14 @@ codex plugin add finance-creative-pipeline@<marketplace-name>
 
 | 状态 | 含义 |
 | --- | --- |
-| `running` | 本地采集、生成或分解正在进行；已发出 `direction_ready` 的方向可同时写入 Figma |
+| `running` | 本地采集、生成、分解或方向闭环正在进行；拆图完成后同步启动5分钟计时和当前方向的 Figma 工作 |
 | `collection_complete` | 仅采集测试已成功完成；生图、拆图和 Figma 均未开始 |
 | `collection_incomplete` | 仅采集测试未找到足量合格参考图；后续阶段未开始 |
 | `awaiting_figma` | ChatGPT 阶段结束，至少一个完整方向可以开始 Figma 同步；失败方向保留审计记录 |
 | `complete` | Figma 同步和视觉核验完成 |
 | `blocked` | 需要用户处理登录、验证码、权限或其他外部阻塞 |
 
-恢复任务时先读取已有 `run.json`、`figma-manifest.json` 和 `figma-sync-state.json`。运行器每完成一个方向就输出 `direction_ready`；Codex 可立即同步该方向，同时保持同一个本地运行进程继续生成下一方向。如果本地阶段已经完成，只排空尚未通过 QA 的 Figma 方向，不要重新运行采集和生成。
+恢复任务时先读取已有 `run.json`、`figma-manifest.json` 和 `figma-sync-state.json`。运行器每拆完一个方向就输出 `direction_ready`，并从拆图完成时刻启动5分钟计时；Codex 立即组合并质检当前方向。只有当前方向通过 Figma QA 且5分钟已经到期，运行器才开始下一方向。等待期间复用并保持同一个 Chrome，不执行下一方向的 ChatGPT 操作。如果本地阶段已经完成，只排空尚未通过 QA 的 Figma 方向，不要重新运行采集和生成。
 
 参考采集先执行内容审核：每个新审核批次固定 6 张，每种素材类型最多 3 批、即 18 张；三批后未凑满目标数量时保留已通过的参考图并直接转入下一类型。每批在防重复提交锁下最多处理两次。直接预览生成、语义分层和逐素材透明 PNG 提取分别拥有独立的两次尝试，每次等待最多 5 分钟。最终失败方向保留在 `figma-manifest.json.failures`；只要存在完整 `ready` 方向，仍进入 `awaiting_figma` 并继续同步成功方向。登录失效、验证码、安全验证和权限问题会立即停止并通知用户。
 
@@ -295,7 +291,7 @@ Finance Creative Pipeline is a Codex plugin for daily Chinese internet-finance o
 2. Uploads each direction reference once and asks ChatGPT Web to understand it internally and directly generate one brand-neutral, complete preview without exposing an intermediate analysis or prompt.
 3. Creates or reuses one dated project per day and keeps preview generation, decomposition, and transparent-asset extraction for each direction in one project chat.
 4. Uses the just-generated preview in the same chat, without re-uploading it on the normal path, to identify complex visual elements and produce a semantic `layers.json` plan.
-5. Extracts complex visuals from preview source pixels first, and uses ChatGPT in the same direction chat to remove overlays and complete only large composite frames that cannot be separated directly.
+5. Sends one batch request in the same direction chat for all non-reconstructable complex visuals and saves each independent transparent PNG that ChatGPT returns.
 6. Syncs previews, accepted transparent assets, and native text/geometry into Figma.
 
 A normal run collects 10 references and generates 10 original directions: five popups, three banners, and two floating creatives, with one type-matched reference per direction.
@@ -303,18 +299,18 @@ A normal run collects 10 references and generates 10 original directions: five p
 ### Design Principles
 
 - Image generation must use ChatGPT Web. Codex image generation is not a fallback.
-- Generate exactly one complete preview; never combine multiple extracted assets into one sheet or image.
+- Generate exactly one complete preview. Ask for all complex assets in one prompt, but require each asset as an independent transparent image rather than a sprite sheet or contact sheet.
 - Popup directions generate only the popup body with a clean outer safety margin. They must not generate an App page, search bar, navigation, bottom tabs, page cards, or a blurred interface background.
-- Use a 95% native-fidelity threshold: complex hero visuals, 3D objects, people, mascots, composite card frameworks, shadows, glass, textures, gradient folds, embossed badges, envelope shells, and non-reconstructable illustrations below the threshold become text-free raster bases. Only simple cards, buttons, ordinary icons, charts, and decorations that can reach 95% stay native in Figma.
+- Keep all text editable, use Remix Icon for ordinary functional icons, and redraw backgrounds, cards, envelope or red-envelope backplates, buttons, rectangles, borders, dividers, simple gradients, and simple shadows natively in Figma. Only genuinely complex people, mascots, 3D subjects, illustrations, ribbons, and special dimensional decorations become raster assets.
 - Treat `preview.png` as the sole visual truth for Figma reconstruction. Convert every normalized bbox to exact canvas coordinates and dimensions; prohibit Auto Layout inside artwork canvases and never approximate, re-center, or optimize the composition.
 - Require a native-resolution Editable export, actual Figma geometry readback, 50% overlay, difference heatmap, and passing QA report before completion. Similarity must be at least 95% while position, size, text baseline, asset completeness, and structural checks also pass; side-by-side screenshots alone are not sufficient.
 - Match ordinary functional icons against official [Remix Icon](https://remixicon.com/) SVGs first and import them as editable Figma vectors instead of hand-drawing temporary icons or using generic placeholders.
 - References provide the visual category, material feel, color relationship, and information hierarchy. Generated work may retain a similar financial subject while redesigning concrete shape details, copy, and local layout instead of copying the full design.
-- Transparent assets use local source-pixel matting first. Large composite frames that enclose editable overlays may use a provenance-marked ChatGPT reconstruction fallback in the same chat. Visually connected hero objects stay grouped as one asset.
+- Never crop elements from the preview and never run local matting. ChatGPT is asked once to return separate transparent PNGs for every declared complex visual; already-transparent outputs are validated and copied without pixel modification.
 - Semantic decomposition completes as soon as the newest non-empty `DECOMPOSE_START` / `DECOMPOSE_END` JSON block is available. It does not depend on one assistant-message selector or the stop control disappearing, and resume/retry paths consume an existing complete response before submitting again.
 - Reference content review submits only fresh public Huaban image URLs, exactly six per new batch. ChatGPT must actually open each URL and return `imageAccessible: true`; only accepted links are downloaded for pixel, hash, and duplicate checks. Completion uses the newest `REFERENCE_AUDIT_START` / `REFERENCE_AUDIT_END` JSON block whose Pin IDs exactly match the current batch, checking the rendered page once per second and the saved conversation no more than once every 15 seconds.
-- Local processing only trims transparent margins and validates Alpha and image boundaries.
-- Tight or boundary-touching small assets are retained with warnings. Empty assets and assets without recoverable Alpha remain rejected; one failure no longer blocks later assets, and partially usable directions may continue.
+- Local processing only validates Alpha, dimensions, foreground ratio, and duplicate bytes; it does not crop, trim, infer Alpha, or remove backgrounds.
+- Empty or opaque assets remain rejected. If ChatGPT returns fewer images than requested, every valid returned image is retained and a partial direction may continue into Figma without per-element retry.
 - Each run date uses one ChatGPT project named `金融运营素材 YYYY-MM-DD`. The `采集筛选-弹窗/Banner/浮窗` content-audit chats and every direction-generation chat stay inside that dated project. Each design direction still uses exactly one chat for direct generation and decomposition.
 - Project chats are explicitly renamed with type-local numbering: `弹窗1`–`弹窗5`, `Banner1`–`Banner3`, and `浮窗1`–`浮窗2`. Isolated validation runs start each included type at 1 instead of using the global direction index.
 - Reference images use ChatGPT's image-specific upload input. After the expected filename, rendered thumbnail, and send-ready state are verified, the same message asks ChatGPT to understand the reference internally and directly generate the preview. The normal successful path uploads once and produces no intermediate analysis, design spec, or visible image prompt. Ordinary generation retries reuse the reference already present in the chat; re-upload occurs only when ChatGPT explicitly reports the reference missing.
@@ -419,22 +415,18 @@ User configuration lives outside the repository and should never be committed:
 | `collection.maxSearchScrolls` | Maximum scroll attempts used to find unseen Pins |
 | `collection.searchPlans` | Type-specific quotas and queries for popup, Banner, and floating references |
 | `generation.directionCount` | Number of original directions |
+| `generation.directionCooldownMinutes` | Minimum interval after one direction finishes decomposition; defaults to 5 minutes and overlaps its Figma reconstruction and QA |
+| `generation.figmaCompletionPollIntervalSeconds` | Local-state polling interval while waiting for the current direction's Figma QA; defaults to 2 seconds |
 | `generation.maxAttempts` | Total preview-generation attempts; defaults to 2 |
 | `generation.imageTimeoutMinutes` | Maximum wait per image-generation attempt; defaults to 5 minutes |
 | `generation.decompositionTimeoutMinutes` | Maximum wait per semantic-decomposition attempt; defaults to 5 minutes |
 | `generation.decompositionMaxAttempts` | Total semantic-decomposition attempts; defaults to 2 |
 | `chatgpt.dailyProjects` | Create or reuse one dated ChatGPT project per day; enabled by default |
 | `chatgpt.projectNamePrefix` | Prefix for dated project names; defaults to `金融运营素材` |
-| `transparentAssets.maxAssets` | Maximum non-reconstructable complex assets per direction; defaults to 4 |
-| `transparentAssets.maxReconstructedAssets` | Maximum large composite assets reconstructed by ChatGPT per direction; defaults to 2 |
-| `transparentAssets.allowTightCrop` | Retain tightly cropped small assets with warnings; enabled by default |
-| `transparentAssets.reconstructionAreaThreshold` | Normalized area threshold for composite-frame reconstruction; defaults to 0.22 |
-| `transparentAssets.timeoutMinutes` | Maximum wait per step 9 separate-asset attempt; defaults to 5 minutes |
-| `transparentAssets.maxAttempts` | Total step 9 attempts per separate asset; defaults to 2 |
+| `transparentAssets.maxAssets` | Maximum non-reconstructable complex assets per direction; defaults to 8 |
+| `transparentAssets.timeoutMinutes` | Maximum wait for the one batch transparent-asset request; defaults to 5 minutes |
 | `transparentAssets.minForegroundRatio` | Minimum foreground ratio per asset |
-| `transparentAssets.maxForegroundRatio` | Maximum foreground ratio per asset |
 | `transparentAssets.minTransparentRatio` | Minimum transparent-pixel ratio per asset |
-| `transparentAssets.maxBorderForegroundRatio` | Maximum foreground ratio along image borders |
 
 See [`assets/config.example.json`](assets/config.example.json) for the complete example.
 
@@ -452,14 +444,14 @@ Primary states:
 
 | State | Meaning |
 | --- | --- |
-| `running` | Local work is active; emitted `direction_ready` entries may sync to Figma concurrently |
+| `running` | Local work or one direction's closure gate is active; decomposition starts the five-minute timer and current-direction Figma work together |
 | `awaiting_figma` | The ChatGPT phase is over and at least one complete direction can be synced; failures remain auditable |
 | `complete` | Figma sync and visual verification are complete |
 | `blocked` | Login, CAPTCHA, permissions, or another external issue requires user action |
 
-Always inspect `run.json`, `figma-manifest.json`, and `figma-sync-state.json` before resuming. Each completed direction emits `direction_ready` and may enter Figma while the same runtime continues generating the next direction. If local generation is already complete, drain only the remaining Figma queue.
+Always inspect `run.json`, `figma-manifest.json`, and `figma-sync-state.json` before resuming. Each decomposed direction emits `direction_ready` and starts its five-minute timer. Reconstruct and verify that direction in Figma during the timer; the runtime keeps the same Chrome session idle and starts the next direction only after both Figma QA and the timer are complete. If local generation is already complete, drain only the remaining Figma queue.
 
-Reference collection submits fresh public image URLs in new batches of exactly six, with at most three batches or 18 candidates per creative type. After the third batch, it keeps whatever approved references were found and continues to the next type instead of filling the nominal quota indefinitely. Content-audit batches retain two handling attempts under the submit-once recovery lock. Steps 6 through 9 retain independent two-attempt budgets with a five-minute limit per attempt. Remaining failures stay in `figma-manifest.json.failures`, while valid `ready` directions continue to Figma. Login expiry, CAPTCHA, security checks, and permission issues still stop immediately and notify the user.
+Reference collection submits fresh public image URLs in new batches of exactly six, with at most three batches or 18 candidates per creative type. After the third batch, it keeps whatever approved references were found and continues to the next type instead of filling the nominal quota indefinitely. Content-audit batches retain two handling attempts under the submit-once recovery lock. Preview generation and semantic decomposition retain their independent attempt budgets; transparent assets use one formal batch submission per direction with no per-element repair turns. Remaining failures stay in `figma-manifest.json.failures`, while valid `ready` directions continue to Figma. Login expiry, CAPTCHA, security checks, and permission issues still stop immediately and notify the user.
 
 ### Output Layout
 
@@ -498,7 +490,7 @@ Each direction uses a side-by-side layout:
 - `Preview`: complete flattened preview on the left.
 - `Editable`: visible editable reconstruction on the right.
 - `Visual Base`: locked and hidden reference only; it must not be used as the visible right-side delivery.
-- `Editable Elements`: accepted source-pixel or provenance-marked reconstructed assets plus native text, cards, buttons, and simple geometry. IDs listed in `suppressesLayerIds` are skipped to prevent duplicates.
+- `Editable Elements`: accepted ChatGPT batch-generated transparent assets plus native editable text, Remix Icon vectors, cards, buttons, backplates, and simple geometry.
 
 Popup editable canvases stay transparent and reconstruct only the popup card, shadow, attached hero, and internal elements; the page behind the popup is never rebuilt. Banner and float directions derive native backgrounds from the background layer in `layers.json`; legacy directions may use `spec.json.palette` only as a fallback. Before completion, screenshot every direction and verify:
 
@@ -533,7 +525,7 @@ npm run check          # Run syntax checks and automated tests
 - Never bypass CAPTCHA, WAF, security interstitials, paywalls, or download restrictions.
 - Download only previews exposed by visible image elements on Huaban Pin detail pages, preserving the list thumbnail, selected image, and Pin source URLs.
 - Do not generate real logos, real company names, fixed returns, guaranteed approvals, fabricated regulatory endorsements, or other misleading financial claims.
-- Never present empty, unrecoverable, or rejected images as valid transparent assets. Tight crops remain visible as warnings, and reconstructed assets must retain explicit provenance.
+- Never present empty, opaque, or rejected images as valid transparent assets. Never crop or locally matte the preview to fabricate an asset.
 - Never commit user configuration, authentication data, or daily run artifacts.
 
 Ordinary functional icons use Remix Icon 4.9.1 under the open-source license included with that package. Remix Icon is used only for functional or informational symbols, never as a logo, trademark, or brand identity.

@@ -5,9 +5,11 @@ import path from "node:path";
 import test from "node:test";
 import sharp from "sharp";
 import {
+  BATCH_GENERATED_ASSET_ENGINE,
   RECONSTRUCTED_ASSET_ENGINE,
   TRANSPARENT_ASSET_ENGINE,
   assignAssetIndices,
+  acceptBatchGeneratedTransparentAsset,
   boxToPixels,
   extractReconstructedAsset,
   recoverAcceptedAsset,
@@ -62,6 +64,44 @@ test("complex raster assets receive deterministic separate indices", () => {
   assert.equal(TRANSPARENT_ASSET_ENGINE, "native-source-pixel-matting");
   assert.deepEqual(assigned.transparentAssets.layerIds, ["hero"]);
   assert.equal(assigned.layers.find((layer) => layer.id === "hero").assetIndex, 0);
+});
+
+test("editable policy keeps text, Remix icons, and simple backplates out of raster assets", () => {
+  const assigned = assignAssetIndices({
+    schemaVersion: 4,
+    canvas: { width: 100, height: 100 },
+    layers: [
+      { id: "amount", kind: "illustration", editable: "raster", text: "66.66", bbox: { x: 0, y: 0, width: 0.2, height: 0.1 } },
+      { id: "cta-icon", kind: "icon", editable: "raster", icon: { query: "arrow right" }, bbox: { x: 0, y: 0, width: 0.1, height: 0.1 } },
+      { id: "cta-backplate", kind: "button", editable: "raster", bbox: { x: 0, y: 0, width: 0.4, height: 0.1 } },
+      { id: "ribbon", kind: "illustration", editable: "raster", bbox: { x: 0, y: 0, width: 0.2, height: 0.2 } }
+    ]
+  });
+  assert.equal(assigned.layers.find((layer) => layer.id === "amount").editable, "text");
+  assert.equal(assigned.layers.find((layer) => layer.id === "cta-icon").editable, "vector");
+  assert.equal(assigned.layers.find((layer) => layer.id === "cta-backplate").editable, "vector");
+  assert.deepEqual(assigned.transparentAssets.layerIds, ["ribbon"]);
+});
+
+test("batch-generated assets must already have transparency and are never locally matted", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "finance-batch-transparent-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const layer = plan().layers.find((item) => item.id === "hero");
+  const transparent = path.join(root, "transparent.png");
+  await sharp({ create: { width: 300, height: 300, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } } })
+    .composite([{ input: Buffer.from('<svg width="120" height="120"><circle cx="60" cy="60" r="55" fill="#ff2255"/></svg>'), left: 90, top: 90 }])
+    .png()
+    .toFile(transparent);
+  const accepted = await acceptBatchGeneratedTransparentAsset({ candidateFile: transparent, layer, outputDir: root });
+  assert.equal(accepted.status, "accepted");
+  assert.equal(accepted.engine, BATCH_GENERATED_ASSET_ENGINE);
+  assert.equal((await sharp(accepted.file).metadata()).width, 300);
+
+  const opaque = path.join(root, "opaque.png");
+  await sharp({ create: { width: 300, height: 300, channels: 3, background: "#ffffff" } }).png().toFile(opaque);
+  const rejected = await acceptBatchGeneratedTransparentAsset({ candidateFile: opaque, layer, outputDir: root });
+  assert.equal(rejected.status, "rejected");
+  assert.match(rejected.reason, /禁止本地抠图修复/);
 });
 
 test("a true transparent image is trimmed and accepted as one independent file", async (t) => {
