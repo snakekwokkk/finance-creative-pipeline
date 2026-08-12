@@ -2041,23 +2041,26 @@ export function clearDirectionFailure(manifest, index) {
 
 export function activeDirectionFailures(manifest) {
   const ready = new Set((manifest.directions || []).filter((item) => item.status === "ready").map((item) => item.index));
-  return (manifest.failures || []).filter((item) => !ready.has(item.index));
+  return (manifest.failures || []).filter((item) => item.stage === "figma" || !ready.has(item.index));
 }
 
 export function directionProcessingOrder(count, manifest) {
   return Array.from({ length: count }, (_, index) => index + 1);
 }
 
-export function currentDirectionIncompleteError(failure, cause = null) {
-  const error = new Error(
-    `第 ${failure.index} 套尚未完整闭环，流水线已暂停且不会进入下一套：${failure.message}`,
-    cause ? { cause } : undefined
-  );
-  error.code = "CURRENT_DIRECTION_INCOMPLETE";
-  error.stage = failure.stage;
-  error.direction = failure.index;
-  error.failure = failure;
-  return error;
+export function directionFailureWithCooldown(failure, cooldownMinutes = 5) {
+  const startedAtMs = Date.parse(failure.failedAt);
+  const durationMs = Math.max(0, Number(cooldownMinutes) || 0) * 60_000;
+  return {
+    ...failure,
+    cooldownStartedAt: new Date(startedAtMs).toISOString(),
+    cooldownUntil: new Date(startedAtMs + durationMs).toISOString()
+  };
+}
+
+export async function closeDirectionFailureAfterCooldown(failure, onDirectionFailure = async () => ({})) {
+  const completion = await onDirectionFailure(failure);
+  return { ...failure, ...(completion || {}) };
 }
 
 export function directionAttemptLimit(config, historicalFailure = false) {
@@ -2069,8 +2072,7 @@ export function directionAttemptLimit(config, historicalFailure = false) {
 
 export function requiresUserAction(error) {
   return error?.code === "CHATGPT_RATE_LIMITED"
-    || error?.code === "FIGMA_DIRECTION_FAILED"
-    || error?.code === "DIRECTION_BARRIER_FAILED"
+    || (error?.code === "DIRECTION_BARRIER_FAILED" && error?.stage !== "figma")
     || /登录|log in|验证码|captcha|安全验证|security check|WAF|权限|permission|access denied|访问被阻止/i
     .test(String(error?.message || error));
 }
@@ -2367,6 +2369,7 @@ export async function generateDirections({
   initialProject = null,
   onProjectReady = async () => {},
   onDirectionReady = async () => {},
+  onDirectionFailure = async () => {},
   shouldStop = () => false
 }) {
   await ensureChatGptLoggedIn(page);
@@ -2383,8 +2386,13 @@ export async function generateDirections({
       });
     } catch (error) {
       error.code ||= "DIRECTION_BARRIER_FAILED";
+      error.stage ||= "figma";
       throw error;
     }
+  };
+  const emitDirectionFailure = async (failure) => {
+    return closeDirectionFailureAfterCooldown(failure, (currentFailure) =>
+      onDirectionFailure({ failure: currentFailure, manifestFile }));
   };
   manifest.directionChats ||= {};
   const rejectionLedger = await readJson(path.join(runDir, "reference-rejections.json"), { rejections: [] });
@@ -2425,6 +2433,15 @@ export async function generateDirections({
   }));
   for (let queuePosition = 0; queuePosition < processingQueue.length; queuePosition += 1) {
     const { index, historicalFailure } = processingQueue[queuePosition];
+    const retainedFailure = activeDirectionFailures(manifest).find((item) => item.index === index);
+    if (retainedFailure?.cooldownUntil) {
+      if (!retainedFailure.cooldownCompletedAt) {
+        const closedFailure = await emitDirectionFailure(retainedFailure);
+        recordDirectionFailure(manifest, closedFailure);
+        await writeJsonAtomic(manifestFile, manifest);
+      }
+      continue;
+    }
     const zero = index - 1;
     const directionDir = path.join(directionsDir, String(index).padStart(2, "0"));
     await fs.mkdir(directionDir, { recursive: true });
@@ -2461,7 +2478,7 @@ export async function generateDirections({
       reference = selectDirectionReference(references, type, typeIndex);
     } catch (error) {
       const attempts = Math.max(1, Number(config.collection.maxDownloadedCandidatesPerDirection || 8));
-      const failure = {
+      const failure = directionFailureWithCooldown({
         index,
         type,
         stage: "collection",
@@ -2470,11 +2487,14 @@ export async function generateDirections({
         chatUrl: null,
         chatTitle,
         failedAt: new Date().toISOString()
-      };
+      }, config.generation.directionCooldownMinutes);
       recordDirectionFailure(manifest, failure);
       await writeJsonAtomic(manifestFile, manifest);
-      console.warn(`第 ${index} 套缺少参考图，已记录并暂停；不会进入下一套：${error.message}`);
-      throw currentDirectionIncompleteError(failure, error);
+      console.warn(`第 ${index} 套缺少参考图，已记录；冷却完成前不会进入下一套：${error.message}`);
+      const closedFailure = await emitDirectionFailure(failure);
+      recordDirectionFailure(manifest, closedFailure);
+      await writeJsonAtomic(manifestFile, manifest);
+      continue;
     }
     if (!project) {
       project = await ensureDailyProject(page, config, manifest.date || path.basename(runDir));
@@ -2700,9 +2720,10 @@ export async function generateDirections({
         copy: legacySpec?.copy || {}
       };
       manifest.directions = manifest.directions.filter((item) => item.index !== index).concat(entry).sort((a, b) => a.index - b.index);
-      clearDirectionFailure(manifest, index);
       await writeJsonAtomic(manifestFile, manifest);
       await emitDirectionReady(entry);
+      clearDirectionFailure(manifest, index);
+      await writeJsonAtomic(manifestFile, manifest);
     } catch (error) {
       if (workflowAbortRequested(error, shouldStop)) throw workflowAbortedError(error);
       if (requiresUserAction(error)) throw error;
@@ -2710,7 +2731,7 @@ export async function generateDirections({
     }
     if (lastError) {
       if (shouldStop()) throw workflowAbortedError(lastError);
-      const failure = {
+      const failure = directionFailureWithCooldown({
         index,
         type,
         stage: lastError.stage || "generation",
@@ -2719,11 +2740,13 @@ export async function generateDirections({
         chatUrl: manifest.directionChats[String(index)]?.url || null,
         chatTitle,
         failedAt: new Date().toISOString()
-      };
+      }, config.generation.directionCooldownMinutes);
       recordDirectionFailure(manifest, failure);
       await writeJsonAtomic(manifestFile, manifest);
-      console.error(`第 ${index} 套连续 ${failure.attempts} 次失败，已记录并暂停；不会进入下一套：${failure.message}`);
-      throw currentDirectionIncompleteError(failure, lastError);
+      console.error(`第 ${index} 套连续 ${failure.attempts} 次失败，已记录；冷却完成前不会进入下一套：${failure.message}`);
+      const closedFailure = await emitDirectionFailure(failure);
+      recordDirectionFailure(manifest, closedFailure);
+      await writeJsonAtomic(manifestFile, manifest);
     }
   }
 

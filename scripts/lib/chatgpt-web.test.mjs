@@ -18,7 +18,8 @@ import {
   conversationUrl,
   conversationApiImageCandidates,
   conversationApiSnapshotTexts,
-  currentDirectionIncompleteError,
+  closeDirectionFailureAfterCooldown,
+  directionFailureWithCooldown,
   dailyProjectName,
   decompositionAttemptLimit,
   decompositionAttemptsExhausted,
@@ -636,6 +637,7 @@ test("human authentication blockers stop immediately", () => {
 
 test("ChatGPT conversation rate limits stop the workflow globally", () => {
   assert.equal(requiresUserAction({ code: "CHATGPT_RATE_LIMITED", message: "请求过于频繁" }), true);
+  assert.equal(requiresUserAction({ code: "FIGMA_DIRECTION_FAILED", stage: "figma", message: "质检失败" }), false);
 });
 
 test("manual workflow stops are distinct from direction failures", () => {
@@ -656,12 +658,38 @@ test("resumed runs keep strict direction order even when an earlier direction fa
   assert.equal(directionAttemptLimit({ generation: { maxAttempts: 2 } }, true), 1);
 });
 
-test("an incomplete current direction becomes a global pause before the next direction", () => {
+test("an incomplete current direction gets a persisted five-minute cooldown", () => {
   const failure = { index: 6, stage: "decomposition", message: "等待分层超时" };
-  const error = currentDirectionIncompleteError(failure);
-  assert.equal(error.code, "CURRENT_DIRECTION_INCOMPLETE");
-  assert.equal(error.direction, 6);
-  assert.match(error.message, /不会进入下一套/);
+  const cooled = directionFailureWithCooldown({ ...failure, failedAt: "2026-08-12T10:00:00.000Z" }, 5);
+  assert.equal(cooled.cooldownStartedAt, "2026-08-12T10:00:00.000Z");
+  assert.equal(cooled.cooldownUntil, "2026-08-12T10:05:00.000Z");
+});
+
+test("a failed direction cannot close before its cooldown callback finishes", async () => {
+  let releaseCooldown;
+  let closed = false;
+  const cooldownGate = new Promise((resolve) => { releaseCooldown = resolve; });
+  const failure = directionFailureWithCooldown({
+    index: 6,
+    stage: "decomposition",
+    message: "layers.json timed out",
+    failedAt: "2026-08-12T10:00:00.000Z"
+  }, 5);
+
+  const closing = closeDirectionFailureAfterCooldown(failure, async () => {
+    await cooldownGate;
+    return { cooldownCompletedAt: "2026-08-12T10:05:00.000Z" };
+  }).then((result) => {
+    closed = true;
+    return result;
+  });
+
+  await Promise.resolve();
+  assert.equal(closed, false);
+  releaseCooldown();
+  const result = await closing;
+  assert.equal(closed, true);
+  assert.equal(result.cooldownCompletedAt, "2026-08-12T10:05:00.000Z");
 });
 
 test("decomposition performs a boundary scan before declaring timeout", async () => {

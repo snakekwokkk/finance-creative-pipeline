@@ -13,6 +13,40 @@ export function directionCooldownWindow(decompositionCompletedAt, cooldownMinute
   };
 }
 
+export function failureCooldownWindow(failedAt, cooldownMinutes = 5) {
+  const startedAtMs = Date.parse(failedAt);
+  if (!Number.isFinite(startedAtMs)) throw new Error("方向失败记录缺少有效时间");
+  const durationMs = Math.max(0, Number(cooldownMinutes) || 0) * 60_000;
+  return {
+    startedAt: new Date(startedAtMs).toISOString(),
+    until: new Date(startedAtMs + durationMs).toISOString()
+  };
+}
+
+export async function waitForFailureCooldown({
+  cooldownUntil,
+  pollIntervalMs = 2_000,
+  shouldStop = () => false,
+  onSnapshot = async () => {}
+}) {
+  let previousRemainingBucket = null;
+  while (true) {
+    if (shouldStop()) {
+      const error = new Error("工作流已停止，失败方向冷却将在恢复后按原截止时间继续");
+      error.code = "WORKFLOW_ABORTED";
+      throw error;
+    }
+    const remainingMs = Math.max(0, Date.parse(cooldownUntil) - Date.now());
+    const remainingBucket = remainingMs === 0 ? 0 : Math.ceil(remainingMs / 60_000);
+    if (remainingBucket !== previousRemainingBucket) {
+      await onSnapshot({ cooldownComplete: remainingMs === 0, cooldownRemainingMs: remainingMs });
+      previousRemainingBucket = remainingBucket;
+    }
+    if (remainingMs === 0) return { cooldownComplete: true, cooldownRemainingMs: 0 };
+    await sleep(Math.max(250, Math.min(Number(pollIntervalMs) || 2_000, remainingMs)));
+  }
+}
+
 export function directionBarrierSnapshot({ nowMs = Date.now(), cooldownUntil, figmaEntry, revision }) {
   const cooldownRemainingMs = Math.max(0, Date.parse(cooldownUntil) - nowMs);
   const figmaComplete = figmaEntry?.status === "qa_passed"
@@ -50,7 +84,7 @@ export async function waitForDirectionBarrier({
       revision
     });
     if (snapshot.figmaStatus === "failed" && state?.directions?.[String(directionIndex)]?.revision === revision) {
-      const error = new Error(`方向 ${directionIndex} 的 Figma 组合或质检失败，请修复当前方向后恢复工作流`);
+      const error = new Error(`方向 ${directionIndex} 的 Figma 组合或质检失败，将记录结果并在 5 分钟冷却后尝试下一方向`);
       error.code = "FIGMA_DIRECTION_FAILED";
       throw error;
     }

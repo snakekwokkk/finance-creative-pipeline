@@ -3,7 +3,13 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { directionBarrierSnapshot, directionCooldownWindow, waitForDirectionBarrier } from "./direction-barrier.mjs";
+import {
+  directionBarrierSnapshot,
+  directionCooldownWindow,
+  failureCooldownWindow,
+  waitForDirectionBarrier,
+  waitForFailureCooldown
+} from "./direction-barrier.mjs";
 
 test("cooldown starts when decomposition completes", () => {
   const window = directionCooldownWindow("2026-08-12T04:00:00.000Z", 5);
@@ -11,7 +17,24 @@ test("cooldown starts when decomposition completes", () => {
   assert.equal(window.until, "2026-08-12T04:05:00.000Z");
 });
 
-test("a failed current Figma direction pauses instead of advancing", async () => {
+test("failed directions use their failure timestamp for the same five-minute gate", () => {
+  const window = failureCooldownWindow("2026-08-12T04:00:00.000Z", 5);
+  assert.equal(window.startedAt, "2026-08-12T04:00:00.000Z");
+  assert.equal(window.until, "2026-08-12T04:05:00.000Z");
+});
+
+test("a failed direction cannot advance before its cooldown deadline", async () => {
+  const snapshots = [];
+  await waitForFailureCooldown({
+    cooldownUntil: new Date(Date.now() + 30).toISOString(),
+    pollIntervalMs: 5,
+    onSnapshot: async (snapshot) => snapshots.push(snapshot)
+  });
+  assert.equal(snapshots[0].cooldownComplete, false);
+  assert.equal(snapshots.at(-1).cooldownComplete, true);
+});
+
+test("a failed current Figma direction is surfaced to the failure cooldown gate", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "direction-barrier-"));
   const stateFile = path.join(directory, "figma-sync-state.json");
   await fs.writeFile(stateFile, JSON.stringify({

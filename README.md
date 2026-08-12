@@ -189,9 +189,11 @@ codex plugin add finance-creative-pipeline@<marketplace-name>
 | `complete` | Figma 同步和视觉核验完成 |
 | `blocked` | 需要用户处理登录、验证码、权限或其他外部阻塞 |
 
+失败方向的冷却期间仍属于 `running`：`run.json.activeDirection.stage` 为 `failed_cooldown`，并包含失败阶段、原因、剩余毫秒和冷却截止时间。运行器会输出 `direction_failed`、`direction_failure_cooldown`、`direction_failure_cooldown_complete` 三类事件；监控该进程的 Codex 必须在失败发生和冷却结束时立即向用户发送可见进度消息。
+
 恢复任务时先读取已有 `run.json`、`figma-manifest.json` 和 `figma-sync-state.json`。方向始终按编号严格顺序处理，历史失败不会被移动到新方向之后。运行器每拆完一个方向就输出 `direction_ready`，并从拆图完成时刻启动 5 分钟计时；Codex 立即组合并质检当前方向。只有当前方向通过 Figma QA 且 5 分钟已经到期，仍在运行的同一进程才开始下一方向。预览、语义分层和批量透明素材监测在主等待窗口结束后都会执行最终边界回扫，先接收临界时刻返回的有效结果，再判断是否失败。等待期间复用并保持同一个 Chrome，不执行下一方向的 ChatGPT 操作。若运行进程或浏览器已经退出，它不会在 5 分钟后自行重启；人工续跑会沿用已记录的截止时间，而不是重新计时。如果本地阶段已经完成，只排空尚未通过 QA 的 Figma 方向，不要重新运行采集和生成。
 
-参考采集先执行内容审核：每个新审核批次固定 6 张，每种素材类型最多 3 批、即 18 张；三批后未凑满目标数量时保留已通过的参考图并转入下一类型采集。进入生产后，方向始终按编号严格顺序执行。预览生成和语义分层各自保留独立尝试预算；透明素材每个方向只允许一次正式批量提交，不进行逐元素重试或修复对话。当前方向任一阶段未完成时，失败记录会写入 `figma-manifest.json.failures`，整条流水线立即暂停，绝不触碰后续方向。登录失效、验证码、安全验证、权限问题或对话访问限流同样会立即停止并通知用户。
+参考采集先执行内容审核：每个新审核批次固定 6 张，每种素材类型最多 3 批、即 18 张；三批后未凑满目标数量时保留已通过的参考图并转入下一类型采集。进入生产后，方向始终按编号严格顺序执行。预览生成和语义分层各自保留独立尝试预算；透明素材每个方向只允许一次正式批量提交，不进行逐元素重试或修复对话。当前方向任一阶段失败时，结果会立即写入 `figma-manifest.json.failures`、更新 `run.json`、输出结构化事件并发送系统通知；随后同一进程与 Chrome 静默等待满 5 分钟，冷却结束后再次上报，才允许尝试下一编号方向。若冷却中途退出，恢复时沿用原截止时间，不重新计时或重试该失败方向。登录失效、验证码、安全验证、权限问题或对话访问限流属于全局阻塞，会立即停止而不是继续后续方向。
 
 ### 输出结构
 
@@ -449,9 +451,11 @@ Primary states:
 | `complete` | Figma sync and visual verification are complete |
 | `blocked` | Login, CAPTCHA, permissions, or another external issue requires user action |
 
+A failed direction remains in `running` state during its cooldown. `run.json.activeDirection.stage` is `failed_cooldown` and includes the failed stage, reason, remaining milliseconds, and deadline. The runtime emits `direction_failed`, `direction_failure_cooldown`, and `direction_failure_cooldown_complete`; the Codex task monitoring the process must immediately surface the first and last events to the user.
+
 Always inspect `run.json`, `figma-manifest.json`, and `figma-sync-state.json` before resuming. Directions always run in strict numeric order; historical failures are never moved behind new directions. Each decomposed direction emits `direction_ready` and starts its five-minute timer. Reconstruct and verify that direction in Figma during the timer; the still-running process keeps the same Chrome session idle and starts the next direction only after both Figma QA and the timer are complete. Preview, decomposition, and batch-asset monitoring perform a final boundary scan before declaring a timeout, so a valid result arriving at the edge is consumed first. If the process or browser exits, it does not relaunch itself after five minutes. A manual resume reuses the persisted deadline instead of restarting the timer. If local generation is already complete, drain only the remaining Figma queue.
 
-Reference collection submits fresh public image URLs in new batches of exactly six, with at most three batches or 18 candidates per creative type. After the third batch, it keeps whatever approved references were found and continues to the next collection type instead of filling the nominal quota indefinitely. Production directions then run in strict numeric order. Preview generation and semantic decomposition retain their independent attempt budgets; transparent assets use one formal batch submission per direction with no per-element repair turns. If any stage of the current direction remains incomplete, the failure stays in `figma-manifest.json.failures` and the whole workflow pauses without touching a later direction. Login expiry, CAPTCHA, security checks, permission issues, and conversation rate limits also stop immediately and notify the user.
+Reference collection submits fresh public image URLs in new batches of exactly six, with at most three batches or 18 candidates per creative type. After the third batch, it keeps whatever approved references were found and continues to the next collection type instead of filling the nominal quota indefinitely. Production directions then run in strict numeric order. Preview generation and semantic decomposition retain their independent attempt budgets; transparent assets use one formal batch submission per direction with no per-element repair turns. If any stage of the current direction fails, the runtime immediately persists and reports the result through `figma-manifest.json`, `run.json`, a structured event, and a system notification. The same process and Chrome then remain idle for a full five-minute failure cooldown; completion is reported again before the next numeric direction may start. A resumed process reuses the persisted deadline instead of restarting the cooldown or retrying that failed direction. Login expiry, CAPTCHA, security checks, permission issues, and conversation rate limits remain global blockers and stop immediately.
 
 ### Output Layout
 

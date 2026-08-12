@@ -18,7 +18,12 @@ import { appendError, ensureRun, readJson, updateRun, writeJsonAtomic } from "./
 import { notify } from "./lib/notify.mjs";
 import { acquireWorkflowLock } from "./lib/workflow-lock.mjs";
 import { directionArtifactRevision } from "./lib/figma-sync-state.mjs";
-import { directionCooldownWindow, waitForDirectionBarrier } from "./lib/direction-barrier.mjs";
+import {
+  directionCooldownWindow,
+  failureCooldownWindow,
+  waitForDirectionBarrier,
+  waitForFailureCooldown
+} from "./lib/direction-barrier.mjs";
 
 const testMode = process.argv.includes("--test");
 const scheduledMode = process.argv.includes("--scheduled");
@@ -187,6 +192,83 @@ try {
     runDate: date,
     initialProject: dailyProject,
     onProjectReady: (chatgptProject) => updateRun(runFile, { chatgptProject }),
+    onDirectionFailure: async ({ failure, manifestFile }) => {
+      const cooldown = failure.cooldownUntil
+        ? { startedAt: failure.cooldownStartedAt || failure.failedAt, until: failure.cooldownUntil }
+        : failureCooldownWindow(failure.failedAt, runConfig.generation.directionCooldownMinutes);
+      const activeDirection = {
+        index: failure.index,
+        type: failure.type,
+        stage: "failed_cooldown",
+        failureStage: failure.stage,
+        message: failure.message,
+        failedAt: cooldown.startedAt,
+        cooldownUntil: cooldown.until,
+        cooldownComplete: false
+      };
+      await updateRun(runFile, {
+        status: "running",
+        blocker: null,
+        figmaManifest: manifestFile,
+        activeDirection
+      });
+      const notice = `第 ${failure.index} 套在 ${failure.stage} 阶段失败：${failure.message}。已开始 5 分钟冷却，最早于 ${new Date(cooldown.until).toLocaleTimeString("zh-CN", { hour12: false, timeZone: runConfig.timezone })} 尝试下一方向。`;
+      await notify("金融运营素材方向失败", notice);
+      console.log(JSON.stringify({
+        event: "direction_failed",
+        runDir,
+        failure,
+        cooldownStartedAt: cooldown.startedAt,
+        cooldownUntil: cooldown.until,
+        message: notice
+      }));
+      await waitForFailureCooldown({
+        cooldownUntil: cooldown.until,
+        pollIntervalMs: Number(runConfig.generation.figmaCompletionPollIntervalSeconds || 2) * 1_000,
+        shouldStop: () => Boolean(stopSignal) || chatgpt?.isClosed(),
+        onSnapshot: async (snapshot) => {
+          await updateRun(runFile, {
+            activeDirection: {
+              ...activeDirection,
+              cooldownComplete: snapshot.cooldownComplete,
+              cooldownRemainingMs: snapshot.cooldownRemainingMs
+            }
+          });
+          console.log(JSON.stringify({
+            event: "direction_failure_cooldown",
+            direction: failure.index,
+            failureStage: failure.stage,
+            cooldownUntil: cooldown.until,
+            ...snapshot
+          }));
+        }
+      });
+      await updateRun(runFile, {
+        activeDirection: {
+          ...activeDirection,
+          stage: "failed_closed",
+          cooldownComplete: true,
+          cooldownRemainingMs: 0,
+          closedAt: new Date().toISOString()
+        }
+      });
+      console.log(JSON.stringify({
+        event: "direction_failure_cooldown_complete",
+        direction: failure.index,
+        failureStage: failure.stage,
+        cooldownUntil: cooldown.until
+      }));
+      const completionNotice = `第 ${failure.index} 套失败后的 5 分钟冷却已结束，现在才允许尝试下一方向。`;
+      await notify("金融运营素材冷却结束", completionNotice);
+      console.log(JSON.stringify({
+        event: "direction_failure_report",
+        direction: failure.index,
+        failureStage: failure.stage,
+        status: "cooldown_complete",
+        message: completionNotice
+      }));
+      return { cooldownCompletedAt: new Date().toISOString() };
+    },
     onDirectionReady: async ({ direction, manifestFile, readyCount }) => {
       const revision = await directionArtifactRevision(direction);
       const cooldown = directionCooldownWindow(
@@ -309,40 +391,7 @@ try {
     }
   }
 } catch (error) {
-  if (error?.code === "CURRENT_DIRECTION_INCOMPLETE") {
-    const manifest = await readJson(path.join(runDir, "figma-manifest.json"), { directions: [], failures: [] });
-    const readyCount = (manifest.directions || []).filter((item) => item.status === "ready").length;
-    const failures = activeDirectionFailures(manifest);
-    await updateRun(runFile, {
-      status: "blocked",
-      blocker: {
-        type: "current_direction_incomplete",
-        direction: error.direction,
-        stage: error.stage,
-        message: error.message,
-        recordedAt: new Date().toISOString()
-      },
-      directionCount: readyCount,
-      directionFailures: failures,
-      activeDirection: {
-        index: error.direction,
-        stage: "blocked",
-        failureStage: error.stage,
-        message: error.message
-      },
-      stages: { collection: "complete", generation: "partial", decomposition: "partial", figma: "pending" }
-    });
-    await notify("金融运营素材流水线已暂停", error.message);
-    console.error(JSON.stringify({
-      status: "blocked",
-      reason: "current_direction_incomplete",
-      direction: error.direction,
-      stage: error.stage,
-      message: error.message,
-      runDir
-    }));
-    process.exitCode = 1;
-  } else if (workflowAbortRequested(error, () => Boolean(stopSignal))) {
+  if (workflowAbortRequested(error, () => Boolean(stopSignal))) {
     const manifest = await readJson(path.join(runDir, "figma-manifest.json"), { directions: [], failures: [] });
     const readyCount = (manifest.directions || []).filter((item) => item.status === "ready").length;
     const failures = activeDirectionFailures(manifest);
