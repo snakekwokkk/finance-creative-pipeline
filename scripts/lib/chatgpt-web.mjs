@@ -516,10 +516,6 @@ export function directionChatTitle(type, typeIndex) {
   return `${prefix}${typeIndex + 1}`;
 }
 
-export function directionChatBootstrapPrompt() {
-  return "请只回复 READY。下一条消息会上传参考图并开始正式分析，本条不要分析、不要生成图片。";
-}
-
 function conversationId(value) {
   try { return new URL(value).pathname.match(/\/c\/([^/]+)/)?.[1] || null; }
   catch { return null; }
@@ -834,6 +830,10 @@ export function promptSubmissionDefinitelyNotAccepted({ expectedPrompt = "", com
     && sendEnabled === true;
 }
 
+export function promptSubmissionAction(url = "") {
+  return conversationUrl(url) ? "click" : "enter";
+}
+
 async function waitForPromptSubmission(page, box, before, timeout = 5_000) {
   const started = Date.now();
   while (Date.now() - started < timeout) {
@@ -884,6 +884,31 @@ async function sendPrompt(page, prompt) {
     page.locator('button[aria-label*="Send"]'),
     page.getByRole("button", { name: /发送|Send message|Send/i })
   ];
+
+  // The project-home composer creates the conversation on the first formal
+  // message. Its visible arrow can remain enabled while swallowing a normal
+  // Playwright click. Submit that first message with one Enter action, then
+  // require observable evidence exactly as we do for an existing chat.
+  if (promptSubmissionAction(before.url) === "enter") {
+    await box.press("Enter");
+    if (await waitForPromptSubmission(page, box, before, 15_000)) return;
+    const sendButton = page.locator('form[data-type="unified-composer"] button[type="submit"], [data-testid="send-button"], button[aria-label*="发送"], button[aria-label*="Send"]').first();
+    const definitelyNotAccepted = await submissionDefinitelyNotAccepted(page, box, prompt, sendButton);
+    const rateLimitNotice = await visibleChatGptRateLimitNotice(page);
+    if (definitelyNotAccepted && rateLimitNotice) {
+      const error = new Error(`ChatGPT 提示操作太频繁，本次提示词未提交：${rateLimitNotice}`);
+      error.code = "CHATGPT_RATE_LIMITED_NOT_ATTEMPTED";
+      throw error;
+    }
+    if (definitelyNotAccepted) {
+      const error = new Error("ChatGPT 项目新聊天的首条正式消息仍完整留在输入框；Enter 未被页面接受，可安全恢复发送");
+      error.code = "CHATGPT_SUBMISSION_NOT_ATTEMPTED";
+      throw error;
+    }
+    const error = new Error("ChatGPT 项目新聊天的首条正式消息已执行一次 Enter，但页面未确认；已锁定并停止，禁止重发");
+    error.code = "CHATGPT_SUBMISSION_UNCONFIRMED";
+    throw error;
+  }
 
   // A prompt may have been accepted even while ChatGPT's client has not yet
   // cleared the composer or rendered the new turn. Never fire a second submit
@@ -2393,13 +2418,6 @@ export async function generateDirections({
       if (chatOpened) return;
       await openDirectionChat(page, project, savedDirectionChat());
       chatOpened = true;
-      if (!conversationUrl(page.url())) {
-        await sendPrompt(page, directionChatBootstrapPrompt());
-        await page.waitForURL((url) => Boolean(conversationUrl(url.href)), { timeout: 30_000 });
-        await stopActiveResponse(page).catch(() => false);
-        const createdUrl = await rememberConversation();
-        if (!createdUrl) throw new Error(`第 ${index} 套无法在日期项目中建立方向聊天`);
-      }
     };
 
     try {
@@ -2456,6 +2474,13 @@ export async function generateDirections({
               prompt: directGenerationPrompt(index, type, size.width, size.height),
               metadata: { previousSources: previewImageSources, assistantBaseline }
             });
+            const directionChatUrl = await waitForConversationUrl(page, 30_000);
+            if (!directionChatUrl) {
+              const error = new Error(`第 ${index} 套正式生图消息已提交，但未获得方向聊天 URL；已锁定该消息并停止，禁止重发`);
+              error.code = "CHATGPT_SUBMISSION_UNCONFIRMED";
+              throw error;
+            }
+            await rememberConversation();
             referenceAvailableInConversation = true;
             attachmentReceipt = {
               ...attachmentReceipt,

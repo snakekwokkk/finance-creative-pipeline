@@ -28,8 +28,8 @@ import {
   directionAttemptLimit,
   directionProcessingOrder,
   directionChatTitle,
-  directionChatBootstrapPrompt,
   promptSubmissionDefinitelyNotAccepted,
+  promptSubmissionAction,
   promptSubmissionObserved,
   directGenerationPrompt,
   parseReferenceAudit,
@@ -179,12 +179,6 @@ test("direction chats use type-local numbering instead of global direction numbe
   assert.throws(() => directionChatTitle("unknown", 0), /不支持的方向类型/);
 });
 
-test("new direction chats are bootstrapped before image upload", () => {
-  const prompt = directionChatBootstrapPrompt();
-  assert.match(prompt, /只回复 READY/);
-  assert.match(prompt, /本条不要分析、不要生成图片/);
-});
-
 test("prompt submission requires observable composer, message, or URL evidence", () => {
   const projectUrl = "https://chatgpt.com/g/g-p-abc/project";
   assert.equal(promptSubmissionObserved({
@@ -203,6 +197,11 @@ test("prompt submission requires observable composer, message, or URL evidence",
   }), true);
   assert.equal(promptSubmissionObserved({ beforeUserCount: 2, afterUserCount: 3, composerText: "" }), true);
   assert.equal(promptSubmissionObserved({ beforeUserCount: 2, afterUserCount: 2, composerText: "" }), true);
+});
+
+test("project-home first messages use one Enter action while existing chats use one click", () => {
+  assert.equal(promptSubmissionAction("https://chatgpt.com/g/g-p-abc/project"), "enter");
+  assert.equal(promptSubmissionAction("https://chatgpt.com/g/g-p-abc/c/conversation-id"), "click");
 });
 
 test("an unchanged ready composer is recoverable instead of ambiguously locked", () => {
