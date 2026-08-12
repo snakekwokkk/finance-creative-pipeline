@@ -48,40 +48,61 @@ export function chatGptRateLimitNotice(text) {
     .test(String(text || ""));
 }
 
+function throwIfVisibleChatGptRateLimited(notice) {
+  if (!notice) return;
+  const error = new Error(`ChatGPT 请求过于频繁，请等待限制解除后恢复同一运行：${notice}`);
+  error.code = "CHATGPT_RATE_LIMITED";
+  throw error;
+}
+
 function extractMarkedJson(text, start, end) {
   const candidate = text.match(new RegExp(`${start}\\s*([\\s\\S]*?)\\s*${end}`))?.[1] || text.match(/```json\\s*([\\s\\S]*?)```/i)?.[1];
   if (!candidate) throw new Error(`ChatGPT 回复中未找到 ${start} JSON`);
   return JSON.parse(candidate.trim());
 }
 
+function markerLineMatches(source, marker) {
+  const matches = [];
+  const pattern = new RegExp(`^\\s*${marker}\\s*$`, "gm");
+  let match;
+  while ((match = pattern.exec(source)) !== null) {
+    matches.push({ index: match.index, end: pattern.lastIndex });
+  }
+  return matches;
+}
+
 function markedJsonBlocks(text, start, end) {
   const source = String(text || "");
   const blocks = [];
-  let cursor = 0;
-  while (cursor < source.length) {
-    const startIndex = source.indexOf(start, cursor);
-    if (startIndex < 0) break;
-    const contentStart = startIndex + start.length;
-    const nextStart = source.indexOf(start, contentStart);
-    const endIndex = source.indexOf(end, contentStart);
-    if (endIndex < 0) {
-      if (nextStart >= 0) {
-        cursor = nextStart;
-        continue;
-      }
-      break;
-    }
-    if (nextStart >= 0 && nextStart < endIndex) {
-      cursor = nextStart;
-      continue;
-    }
+  const starts = markerLineMatches(source, start);
+  const ends = markerLineMatches(source, end);
+  let endCursor = 0;
+  for (const startMatch of starts) {
+    while (endCursor < ends.length && ends[endCursor].index < startMatch.end) endCursor += 1;
+    const endMatch = ends[endCursor];
+    if (!endMatch) break;
+    const nextStart = starts.find((candidate) => candidate.index > startMatch.index);
+    if (nextStart && nextStart.index < endMatch.index) continue;
     blocks.push({
-      text: source.slice(startIndex, endIndex + end.length),
-      json: source.slice(contentStart, endIndex)
+      text: source.slice(startMatch.index, endMatch.end),
+      json: source.slice(startMatch.end, endMatch.index)
     });
-    cursor = endIndex + end.length;
+    endCursor += 1;
   }
   return blocks;
+}
+
+function fencedJsonBlocks(text) {
+  const source = String(text || "");
+  return [...source.matchAll(/```json\s*([\s\S]*?)```/gi)].map((match) => ({
+    text: match[0],
+    json: match[1]
+  }));
+}
+
+function decompositionCandidateBlocks(text) {
+  const marked = markedJsonBlocks(text, "DECOMPOSE_START", "DECOMPOSE_END");
+  return marked.length ? marked : fencedJsonBlocks(text);
 }
 
 export function conversationApiSnapshotTexts(payload) {
@@ -145,7 +166,7 @@ export function conversationApiImageCandidates(payload) {
 
 export function decompositionJsonResponses(text) {
   const responses = [];
-  for (const block of markedJsonBlocks(text, "DECOMPOSE_START", "DECOMPOSE_END")) {
+  for (const block of decompositionCandidateBlocks(text)) {
     try {
       const payload = JSON.parse(block.json.trim());
       if (Number(payload?.schemaVersion || 0) < 4 || !Array.isArray(payload?.layers) || !payload.layers.length) continue;
@@ -161,7 +182,7 @@ export function decompositionJsonResponses(text) {
 
 export function decompositionObservations(text) {
   const observations = [];
-  for (const block of markedJsonBlocks(text, "DECOMPOSE_START", "DECOMPOSE_END")) {
+  for (const block of decompositionCandidateBlocks(text)) {
     const key = block.json.trim();
     try {
       const payload = JSON.parse(key);
@@ -525,19 +546,36 @@ export async function ensureDirectionChatTitle(page, project, chatUrl, title) {
   const id = conversationId(chatUrl);
   if (!project?.enabled || !id) throw new Error(`无法将 ChatGPT 方向聊天命名为“${title}”：缺少有效的项目或聊天 URL`);
   let renameError;
+  let navigatedAway = false;
   try {
-    await navigateWithRetry(page, project.url);
     const selector = `[data-testid="project-conversation-overflow-menu"] button[data-conversation-options-trigger="${id}"]`;
-    const started = Date.now();
+    let started = Date.now();
     let trigger;
-    while (Date.now() - started < 30_000) {
+    // The project conversation menu is normally already present in the
+    // current chat sidebar. Prefer it so renaming does not reload the project
+    // page and then reload the conversation again.
+    while (Date.now() - started < 3_000) {
       const candidates = page.locator(selector);
       if (await candidates.count()) {
         trigger = candidates.last();
         if (await trigger.isVisible().catch(() => false)) break;
       }
       trigger = null;
-      await page.waitForTimeout(500);
+      await page.waitForTimeout(250);
+    }
+    if (!trigger) {
+      await navigateWithRetry(page, project.url);
+      navigatedAway = true;
+      started = Date.now();
+      while (Date.now() - started < 30_000) {
+        const candidates = page.locator(selector);
+        if (await candidates.count()) {
+          trigger = candidates.last();
+          if (await trigger.isVisible().catch(() => false)) break;
+        }
+        trigger = null;
+        await page.waitForTimeout(500);
+      }
     }
     if (!trigger) throw new Error("未在日期项目中找到对应的方向聊天");
     if (!(await trigger.getAttribute("aria-label") || "").includes(`“${title}”`)) {
@@ -560,8 +598,10 @@ export async function ensureDirectionChatTitle(page, project, chatUrl, title) {
   } catch (error) {
     renameError = error;
   }
-  try { await navigateWithRetry(page, chatUrl); }
-  catch (error) { throw new Error(`聊天“${title}”重命名后无法返回原对话：${error.message}`); }
+  if (navigatedAway) {
+    try { await navigateWithRetry(page, chatUrl); }
+    catch (error) { throw new Error(`聊天“${title}”重命名后无法返回原对话：${error.message}`); }
+  }
   if (renameError) throw new Error(`无法将 ChatGPT 方向聊天命名为“${title}”：${renameError.message}`);
   return { title, chatUrl };
 }
@@ -982,12 +1022,15 @@ async function waitForAssistantText(page, previousCount, timeout) {
 
 const conversationApiCache = new WeakMap();
 
-async function conversationApiPayload(page, minIntervalMs = 1_000) {
+const SAVED_CONVERSATION_POLL_INTERVAL_MS = 15_000;
+
+async function conversationApiPayload(page, minIntervalMs = SAVED_CONVERSATION_POLL_INTERVAL_MS) {
   const conversationId = page.url().match(/\/c\/([^/?#]+)/)?.[1];
   if (!conversationId) return null;
   const now = Date.now();
   const cached = conversationApiCache.get(page);
-  if (cached && now - cached.at < Math.max(1_000, Number(minIntervalMs) || 1_000)) return cached.payload;
+  if (cached?.conversationId === conversationId
+    && now - cached.at < Math.max(SAVED_CONVERSATION_POLL_INTERVAL_MS, Number(minIntervalMs) || 0)) return cached.payload;
   const payload = await page.evaluate(async (id) => {
     try {
       const response = await fetch(`/backend-api/conversation/${encodeURIComponent(id)}`, {
@@ -1000,19 +1043,19 @@ async function conversationApiPayload(page, minIntervalMs = 1_000) {
       return null;
     }
   }, conversationId).catch(() => null);
-  conversationApiCache.set(page, { at: now, payload });
+  conversationApiCache.set(page, { conversationId, at: now, payload });
   return payload;
 }
 
-async function conversationApiTextSnapshots(page, minIntervalMs = 1_000) {
+async function conversationApiTextSnapshots(page, minIntervalMs = SAVED_CONVERSATION_POLL_INTERVAL_MS) {
   return conversationApiSnapshotTexts(await conversationApiPayload(page, minIntervalMs));
 }
 
-async function conversationApiImages(page) {
-  return conversationApiImageCandidates(await conversationApiPayload(page));
+async function conversationApiImages(page, minIntervalMs = SAVED_CONVERSATION_POLL_INTERVAL_MS) {
+  return conversationApiImageCandidates(await conversationApiPayload(page, minIntervalMs));
 }
 
-async function conversationTextSnapshots(page, { savedConversationPollIntervalMs = 1_000 } = {}) {
+async function conversationTextSnapshots(page, { savedConversationPollIntervalMs = SAVED_CONVERSATION_POLL_INTERVAL_MS } = {}) {
   const snapshots = [];
   const selectors = [
     '[data-message-author-role="assistant"]',
@@ -1149,6 +1192,7 @@ async function waitForDecompositionResponse(page, knownKeys, timeout) {
   const started = Date.now();
   while (Date.now() - started < timeout) {
     if (page.isClosed()) throw new Error("ChatGPT 页面已关闭，无法继续等待语义分层结果");
+    throwIfVisibleChatGptRateLimited(await visibleChatGptRateLimitNotice(page));
     const observation = latestNewDecompositionObservation(await conversationTextSnapshots(page), knownKeys);
     if (observation?.valid) return observation;
     if (observation && !observation.valid) {
@@ -1639,6 +1683,7 @@ async function saveLastAssistantImage(page, file, timeout, previousSources = [],
   const started = Date.now();
   const previous = new Set(previousSources);
   while (Date.now() - started < timeout) {
+    throwIfVisibleChatGptRateLimited(await visibleChatGptRateLimitNotice(page));
     const assistantMessages = page.locator('[data-message-author-role="assistant"]');
     const assistantCount = await assistantMessages.count().catch(() => assistantBaseline);
     for (let index = assistantCount - 1; index >= assistantBaseline; index -= 1) {
@@ -1852,7 +1897,8 @@ export function directionAttemptLimit(config, historicalFailure = false) {
 }
 
 export function requiresUserAction(error) {
-  return /登录|log in|验证码|captcha|安全验证|security check|WAF|权限|permission|access denied|访问被阻止/i
+  return error?.code === "CHATGPT_RATE_LIMITED"
+    || /登录|log in|验证码|captcha|安全验证|security check|WAF|权限|permission|access denied|访问被阻止/i
     .test(String(error?.message || error));
 }
 

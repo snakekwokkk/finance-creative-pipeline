@@ -83,6 +83,36 @@ DECOMPOSE_END`;
   assert.ok(state.knownKeys.size > 0);
 });
 
+test("decomposition parsing ignores marker words embedded in prompt prose", () => {
+  const prompt = `只输出标记包裹的合法JSON。严格只用三行：第一行DECOMPOSE_START，第二行是完整JSON，第三行DECOMPOSE_END。
+DECOMPOSE_START
+{"schemaVersion":4,"bboxFormat":"normalized-xywh-object","canvas":{"width":1002,"height":1335},"layers":[]}
+DECOMPOSE_END`;
+  const response = `DECOMPOSE_START
+{"schemaVersion":4,"bboxFormat":"normalized-xywh-object","canvas":{"width":1002,"height":1335},"layers":[{"id":"hero","editable":"raster","bbox":{"x":0.1,"y":0.1,"width":0.5,"height":0.4}}]}
+DECOMPOSE_END`;
+  const observations = decompositionObservations(`${prompt}\n${response}`);
+  assert.equal(observations.length, 1);
+  assert.equal(observations[0].valid, true);
+  assert.equal(observations[0].payload.layers[0].id, "hero");
+});
+
+test("decomposition parsing rejects inline marker prose without treating it as JSON", () => {
+  const prose = "第一行DECOMPOSE_START，第二行是完整JSON，第三行DECOMPOSE_END。";
+  assert.deepEqual(decompositionObservations(prose), []);
+  assert.deepEqual(decompositionJsonResponses(prose), []);
+});
+
+test("decomposition parsing accepts a valid JSON fence when ChatGPT omits markers", () => {
+  const response = `\`\`\`json
+{"schemaVersion":4,"bboxFormat":"normalized-xywh-object","canvas":{"width":1002,"height":1335},"layers":[{"id":"cta","editable":"vector","bbox":{"x":0.2,"y":0.8,"width":0.6,"height":0.1}}]}
+\`\`\``;
+  const observations = decompositionObservations(response);
+  assert.equal(observations.length, 1);
+  assert.equal(observations[0].valid, true);
+  assert.equal(observations[0].payload.layers[0].id, "cta");
+});
+
 test("ChatGPT login detection ignores unrelated sidebar text", () => {
   assert.equal(chatGptLoginRequired({ url: "https://chatgpt.com/", visibleLoginControls: 0 }), false);
   assert.equal(chatGptLoginRequired({ url: "https://chatgpt.com/auth/login", visibleLoginControls: 0 }), true);
@@ -585,6 +615,10 @@ test("human authentication blockers stop immediately", () => {
   assert.equal(requiresUserAction(new Error("ChatGPT 专用浏览器尚未登录")), true);
   assert.equal(requiresUserAction(new Error("等待 ChatGPT 生成图片超时")), false);
   assert.equal(requiresUserAction(new Error("未找到 ChatGPT 输入框，当前页面状态不支持输入")), false);
+});
+
+test("ChatGPT conversation rate limits stop the workflow globally", () => {
+  assert.equal(requiresUserAction({ code: "CHATGPT_RATE_LIMITED", message: "请求过于频繁" }), true);
 });
 
 test("manual workflow stops are distinct from direction failures", () => {
