@@ -26,10 +26,54 @@ import {
 } from "./lib/direction-barrier.mjs";
 import { postCollectionCooldownWindow, waitForPostCollectionCooldown } from "./lib/generation-pacing.mjs";
 
+const rawArgs = process.argv.slice(2);
+const usage = `Finance Creative Pipeline
+
+Usage:
+  node scripts/run.mjs [--test] [--scheduled] [--visible]
+  node scripts/run.mjs --types popup,banner,float [--collection-only] [--visible]
+  node scripts/run.mjs --from-direction 3 [--visible]
+
+Options:
+  --test             Run one popup direction.
+  --scheduled        Run in scheduled mode.
+  --visible          Force the dedicated Chrome window to stay visible.
+  --types LIST       Run one direction for each listed type.
+  --from-direction N Resume generation from direction N and skip earlier directions.
+  --collection-only  Stop after reference collection; requires --types.
+  --help, -h         Show this help without starting the workflow.`;
+
+if (rawArgs.includes("--help") || rawArgs.includes("-h")) {
+  console.log(usage);
+  process.exit(0);
+}
+
+const valueOptions = new Set(["--types", "--from-direction"]);
+const flagOptions = new Set(["--test", "--scheduled", "--visible", "--collection-only"]);
+for (let index = 0; index < rawArgs.length; index += 1) {
+  const argument = rawArgs[index];
+  if (valueOptions.has(argument)) {
+    if (!rawArgs[index + 1] || rawArgs[index + 1].startsWith("--")) {
+      throw new Error(`${argument} 需要提供参数`);
+    }
+    index += 1;
+    continue;
+  }
+  if (!flagOptions.has(argument)) {
+    throw new Error(`未知参数：${argument}。运行 --help 查看可用参数。`);
+  }
+}
+
 const testMode = process.argv.includes("--test");
 const scheduledMode = process.argv.includes("--scheduled");
 const visibleMode = process.argv.includes("--visible");
 const collectionOnly = process.argv.includes("--collection-only");
+const fromDirectionIndex = process.argv.indexOf("--from-direction");
+const fromDirectionValue = fromDirectionIndex >= 0 ? Number(process.argv[fromDirectionIndex + 1]) : 1;
+if (!Number.isInteger(fromDirectionValue) || fromDirectionValue < 1) {
+  throw new Error("--from-direction 需要提供大于等于 1 的方向编号");
+}
+const fromDirection = fromDirectionValue;
 if (process.argv.includes("--source")) throw new Error("采图来源固定为花瓣，不再支持 --source 参数");
 const typesIndex = process.argv.indexOf("--types");
 const requestedTypes = typesIndex >= 0
@@ -138,23 +182,25 @@ try {
     : await ensureDailyProject(chatgpt, runConfig, date);
   const chatgptProject = { ...dailyProject, resolvedAt: new Date().toISOString() };
   await updateRun(runFile, { chatgptProject });
-  const references = await collectReferences({
-    context,
-    page: sourcePage,
-    detailPage: sourceDetail,
-    config: runConfig,
-    runDir,
-    date,
-    count: referenceCount,
-    visualReviewer: ({ type, candidates }) => reviewReferenceCandidates({
-      page: chatgpt,
-      project: dailyProject,
-      config: runConfig,
-      runDir,
-      type,
-      candidates
-    })
-  });
+  const references = fromDirection > 1 && existingRun?.stages?.collection === "complete"
+    ? await readJson(path.join(runDir, "references.json"), [])
+    : await collectReferences({
+        context,
+        page: sourcePage,
+        detailPage: sourceDetail,
+        config: runConfig,
+        runDir,
+        date,
+        count: referenceCount,
+        visualReviewer: ({ type, candidates }) => reviewReferenceCandidates({
+          page: chatgpt,
+          project: dailyProject,
+          config: runConfig,
+          runDir,
+          type,
+          candidates
+        })
+      });
   if (collectionOnly) {
     const collectionSucceeded = references.length >= referenceCount;
     const status = collectionSucceeded ? "collection_complete" : "collection_incomplete";
@@ -217,6 +263,8 @@ try {
     references,
     count: directionCount,
     directionTypes: validationMode ? requestedTypes : null,
+    startDirection: validationMode ? 1 : fromDirection,
+    retryDirection: validationMode ? null : fromDirection,
     runDate: date,
     initialProject: dailyProject,
     onProjectReady: (chatgptProject) => updateRun(runFile, { chatgptProject }),

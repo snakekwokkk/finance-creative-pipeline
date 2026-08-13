@@ -1,6 +1,21 @@
 # Changelog
 
-## Unreleased
+## 1.7.9
+
+- Added `--help` and strict command-line validation so documentation checks cannot accidentally start the browser workflow.
+- Added `--from-direction N` recovery to reuse completed collection output, skip earlier directions, and retry only the requested direction without resubmitting their prompts.
+- Kept preview pixels unchanged during recovery; canvas-size mismatches remain visible to strict Figma QA instead of being silently stretched.
+
+## 1.7.8
+
+- Fixed transparent-asset candidate mapping so images are collected only from assistant turns created after the batch prompt, opaque or stale candidates do not consume an asset slot, and later valid transparent PNGs remain eligible.
+- Preserve rejected and unassigned batch candidates under `layers/rejected-candidates/` for diagnosis instead of deleting all temporary evidence.
+
+## 1.7.7
+
+- Reduced ChatGPT Web history pressure by making rendered DOM the primary response source and delaying saved-conversation reads to a 120-second fallback cadence.
+- Removed reference-audit bootstrap messages, deferred direction chat renaming until a direction is complete, and added structured saved-conversation request counters.
+- Hardened daily-project name field detection against delayed ChatGPT dialog rendering.
 
 ## 1.7.6
 

@@ -31,10 +31,23 @@ export function referenceAuditPacing(config = {}) {
   const collection = config?.collection || {};
   return {
     domPollIntervalMs: secondsToMs(collection.visualReviewDomPollIntervalSeconds, 1),
-    savedConversationPollIntervalMs: secondsToMs(collection.visualReviewSavedConversationPollIntervalSeconds, 15, 1),
+    savedConversationPollIntervalMs: secondsToMs(collection.visualReviewSavedConversationPollIntervalSeconds, 120, 30),
+    savedConversationFallbackAfterMs: secondsToMs(collection.visualReviewSavedConversationFallbackAfterSeconds, 60, 15),
     submissionIntervalMs: secondsToMs(collection.visualReviewSubmissionIntervalSeconds, 30, 0),
     rateLimitCooldownMs: minuteTimeout(collection.visualReviewRateLimitCooldownMinutes || 10)
   };
+}
+
+export function generationConversationPacing(config = {}) {
+  const generation = config?.generation || {};
+  return {
+    savedConversationPollIntervalMs: secondsToMs(generation.savedConversationPollIntervalSeconds, 120, 30),
+    savedConversationFallbackAfterMs: secondsToMs(generation.savedConversationFallbackAfterSeconds, 60, 15)
+  };
+}
+
+export function savedConversationFallbackDue({ startedAt, now = Date.now(), fallbackAfterMs = 60_000, deadline = Infinity, boundaryWindowMs = 15_000 } = {}) {
+  return now - Number(startedAt || now) >= fallbackAfterMs || deadline - now <= boundaryWindowMs;
 }
 
 export function chatGptRateLimitCooldownMs(config = {}) {
@@ -204,6 +217,11 @@ export function conversationApiImageCandidates(payload) {
     visit(message.metadata, message.create_time, false);
   }
   return candidates;
+}
+
+export function batchSavedImageCandidateEligible(candidate, previousSources = [], submittedAfter = 0) {
+  return !new Set(previousSources).has(candidate?.key)
+    && Number(candidate?.createdAt || 0) >= Number(submittedAfter || 0);
 }
 
 export function decompositionJsonResponses(text) {
@@ -693,14 +711,20 @@ async function waitForProjectUi(page, name, timeout = 20_000) {
   throw new Error("未找到 ChatGPT 新项目按钮，无法按日期整理自动任务聊天");
 }
 
-async function visibleTextInput(page, timeout = 15_000) {
+async function visibleTextInput(page, timeout = 30_000) {
   const started = Date.now();
   while (Date.now() - started < timeout) {
-    const inputs = page.locator('input[name="projectName"], #project-name, input[type="text"]');
-    const count = await inputs.count();
-    for (let index = 0; index < count; index += 1) {
-      const input = inputs.nth(index);
-      if (await input.isVisible().catch(() => false)) return input;
+    const exactInputs = page.locator('#project-name, input[name="projectName"]');
+    const exactCount = await exactInputs.count();
+    for (let index = 0; index < exactCount; index += 1) {
+      const input = exactInputs.nth(index);
+      if (await input.isVisible().catch(() => false) && await input.isEditable().catch(() => false)) return input;
+    }
+    const fallbackInputs = page.locator('input[type="text"], input:not([type]), textarea');
+    const fallbackCount = await fallbackInputs.count();
+    for (let index = 0; index < fallbackCount; index += 1) {
+      const input = fallbackInputs.nth(index);
+      if (await input.isVisible().catch(() => false) && await input.isEditable().catch(() => false)) return input;
     }
     await page.waitForTimeout(250);
   }
@@ -1063,16 +1087,34 @@ async function waitForAssistantText(page, previousCount, timeout) {
 }
 
 const conversationApiCache = new WeakMap();
+const conversationApiMetrics = new WeakMap();
 
-const SAVED_CONVERSATION_POLL_INTERVAL_MS = 15_000;
+const SAVED_CONVERSATION_POLL_INTERVAL_MS = 120_000;
 
-async function conversationApiPayload(page, minIntervalMs = SAVED_CONVERSATION_POLL_INTERVAL_MS) {
+export function savedConversationRequestMetrics(page) {
+  return { ...(conversationApiMetrics.get(page) || { requests: 0, cacheHits: 0 }) };
+}
+
+async function conversationApiPayload(page, minIntervalMs = SAVED_CONVERSATION_POLL_INTERVAL_MS, reason = "fallback") {
   const conversationId = page.url().match(/\/c\/([^/?#]+)/)?.[1];
   if (!conversationId) return null;
   const now = Date.now();
   const cached = conversationApiCache.get(page);
-  if (cached?.conversationId === conversationId
-    && now - cached.at < Math.max(SAVED_CONVERSATION_POLL_INTERVAL_MS, Number(minIntervalMs) || 0)) return cached.payload;
+  if (cached?.conversationId === conversationId && now - cached.at < Math.max(30_000, Number(minIntervalMs) || 0)) {
+    const metrics = savedConversationRequestMetrics(page);
+    conversationApiMetrics.set(page, { ...metrics, cacheHits: metrics.cacheHits + 1 });
+    return cached.payload;
+  }
+  const metrics = savedConversationRequestMetrics(page);
+  const requestNumber = metrics.requests + 1;
+  conversationApiMetrics.set(page, { ...metrics, requests: requestNumber });
+  console.log(JSON.stringify({
+    event: "chatgpt_saved_conversation_request",
+    conversationId,
+    requestNumber,
+    reason,
+    minimumIntervalMs: Math.max(30_000, Number(minIntervalMs) || 0)
+  }));
   const payload = await page.evaluate(async (id) => {
     try {
       const response = await fetch(`/backend-api/conversation/${encodeURIComponent(id)}`, {
@@ -1089,15 +1131,19 @@ async function conversationApiPayload(page, minIntervalMs = SAVED_CONVERSATION_P
   return payload;
 }
 
-async function conversationApiTextSnapshots(page, minIntervalMs = SAVED_CONVERSATION_POLL_INTERVAL_MS) {
-  return conversationApiSnapshotTexts(await conversationApiPayload(page, minIntervalMs));
+async function conversationApiTextSnapshots(page, minIntervalMs = SAVED_CONVERSATION_POLL_INTERVAL_MS, reason = "text-fallback") {
+  return conversationApiSnapshotTexts(await conversationApiPayload(page, minIntervalMs, reason));
 }
 
-async function conversationApiImages(page, minIntervalMs = SAVED_CONVERSATION_POLL_INTERVAL_MS) {
-  return conversationApiImageCandidates(await conversationApiPayload(page, minIntervalMs));
+async function conversationApiImages(page, minIntervalMs = SAVED_CONVERSATION_POLL_INTERVAL_MS, reason = "image-fallback") {
+  return conversationApiImageCandidates(await conversationApiPayload(page, minIntervalMs, reason));
 }
 
-async function conversationTextSnapshots(page, { savedConversationPollIntervalMs = SAVED_CONVERSATION_POLL_INTERVAL_MS } = {}) {
+async function conversationTextSnapshots(page, {
+  includeSavedConversation = false,
+  savedConversationPollIntervalMs = SAVED_CONVERSATION_POLL_INTERVAL_MS,
+  reason = "text-fallback"
+} = {}) {
   const snapshots = [];
   const selectors = [
     '[data-message-author-role="assistant"]',
@@ -1117,12 +1163,14 @@ async function conversationTextSnapshots(page, { savedConversationPollIntervalMs
     page.locator("body").textContent().catch(() => "")
   ]);
   snapshots.push(bodyInnerText, bodyTextContent || "");
-  snapshots.push(...await conversationApiTextSnapshots(page, savedConversationPollIntervalMs));
+  if (includeSavedConversation) {
+    snapshots.push(...await conversationApiTextSnapshots(page, savedConversationPollIntervalMs, reason));
+  }
   return snapshots;
 }
 
 export async function existingDecompositionConversationState(page) {
-  const snapshots = await conversationTextSnapshots(page);
+  const snapshots = await conversationTextSnapshots(page, { includeSavedConversation: true, reason: "decomposition-recovery" });
   return {
     snapshots,
     recovered: latestNewDecompositionResponse(snapshots, new Set()),
@@ -1221,6 +1269,8 @@ async function sendReferenceAuditPromptWithPacing({ page, prompt, state, stateFi
 export async function waitForDecompositionResponse(page, knownKeys, timeout, {
   pollIntervalMs = 500,
   boundaryGraceMs = 15_000,
+  savedConversationPollIntervalMs = SAVED_CONVERSATION_POLL_INTERVAL_MS,
+  savedConversationFallbackAfterMs = 60_000,
   onRateLimit = null
 } = {}) {
   const started = Date.now();
@@ -1235,7 +1285,17 @@ export async function waitForDecompositionResponse(page, knownKeys, timeout, {
       continue;
     }
     throwIfVisibleChatGptRateLimited(notice);
-    const observation = latestNewDecompositionObservation(await conversationTextSnapshots(page), knownKeys);
+    const now = Date.now();
+    const observation = latestNewDecompositionObservation(await conversationTextSnapshots(page, {
+      includeSavedConversation: savedConversationFallbackDue({
+        startedAt: started + pausedMs,
+        now,
+        fallbackAfterMs: savedConversationFallbackAfterMs,
+        deadline: started + pausedMs + timeout
+      }),
+      savedConversationPollIntervalMs,
+      reason: "decomposition-fallback"
+    }), knownKeys);
     if (observation?.valid) return observation;
     if (observation && !observation.valid) {
       const error = new Error(`ChatGPT 已返回语义分层标记，但结果无效：${observation.error}`);
@@ -1253,7 +1313,11 @@ export async function waitForDecompositionResponse(page, knownKeys, timeout, {
       continue;
     }
     throwIfVisibleChatGptRateLimited(notice);
-    const observation = latestNewDecompositionObservation(await conversationTextSnapshots(page), knownKeys);
+    const observation = latestNewDecompositionObservation(await conversationTextSnapshots(page, {
+      includeSavedConversation: true,
+      savedConversationPollIntervalMs,
+      reason: "decomposition-boundary"
+    }), knownKeys);
     if (observation?.valid) return observation;
     if (observation && !observation.valid) {
       const error = new Error(`ChatGPT 已返回语义分层标记，但结果无效：${observation.error}`);
@@ -1269,16 +1333,18 @@ export async function waitForDecompositionResponse(page, knownKeys, timeout, {
 
 async function currentReferenceAuditResponse(page, candidates) {
   return latestReferenceAuditResponse(
-    await conversationTextSnapshots(page),
+    await conversationTextSnapshots(page, { includeSavedConversation: true, reason: "reference-audit-recovery" }),
     candidates
   );
 }
 
 async function waitForReferenceAuditResponse(page, candidates, timeout, knownKeys = new Set(), {
   domPollIntervalMs = 1_000,
-  savedConversationPollIntervalMs = 15_000,
+  savedConversationPollIntervalMs = SAVED_CONVERSATION_POLL_INTERVAL_MS,
+  savedConversationFallbackAfterMs = 60_000,
   onRateLimit = null
 } = {}) {
+  const started = Date.now();
   let deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     if (page.isClosed()) throw new Error("ChatGPT 页面已关闭，无法继续等待参考图内容审核结果");
@@ -1295,7 +1361,9 @@ async function waitForReferenceAuditResponse(page, candidates, timeout, knownKey
       continue;
     }
     const observation = latestNewReferenceAuditObservation(await conversationTextSnapshots(page, {
-      savedConversationPollIntervalMs
+      includeSavedConversation: savedConversationFallbackDue({ startedAt: started, fallbackAfterMs: savedConversationFallbackAfterMs, deadline }),
+      savedConversationPollIntervalMs,
+      reason: "reference-audit-fallback"
     }), candidates, knownKeys);
     if (observation?.valid) return observation;
     if (observation && !observation.valid) {
@@ -1308,7 +1376,9 @@ async function waitForReferenceAuditResponse(page, candidates, timeout, knownKey
   const graceStarted = Date.now();
   while (Date.now() - graceStarted < 5_000) {
     const observation = latestNewReferenceAuditObservation(await conversationTextSnapshots(page, {
-      savedConversationPollIntervalMs
+      includeSavedConversation: true,
+      savedConversationPollIntervalMs,
+      reason: "reference-audit-boundary"
     }), candidates, knownKeys);
     if (observation?.valid) return observation;
     if (observation && !observation.valid) {
@@ -1334,10 +1404,6 @@ export function referenceAuditChatTitle(type) {
   const label = { popup: "弹窗", banner: "Banner", float: "浮窗" }[type];
   if (!label) throw new Error(`不支持的参考图类型：${type}`);
   return `采集筛选-${label}`;
-}
-
-export function referenceAuditChatBootstrapPrompt(title) {
-  return `请只回复 REFERENCE_AUDIT_READY。这是日期项目内的“${title}”审核会话初始化，本条不要分析链接或图片。`;
 }
 
 function persistedAuditCandidates(candidates) {
@@ -1445,6 +1511,8 @@ export async function reviewReferenceCandidates({ page, project, config, runDir,
   const chatKey = provider === "huaban" ? type : `${provider}:${type}`;
   let saved = state.chats[chatKey];
   const title = referenceAuditChatTitle(type, provider);
+  const expectedPinIds = candidates.map((item) => String(item.pinId));
+  let submittedWhileCreating = false;
   if (!saved?.url) {
     const existingUrl = await findReferenceAuditChatByTitle(page, project, title);
     if (existingUrl) {
@@ -1463,29 +1531,56 @@ export async function reviewReferenceCandidates({ page, project, config, runDir,
           notice: preflightRateLimit
         });
       }
-      await sendReferenceAuditPromptWithPacing({
-        page,
-        prompt: referenceAuditChatBootstrapPrompt(title),
-        state,
-        stateFile,
-        pacing,
-        chatUrl: project.url
-      });
+      assertReferenceAuditSubmissionBatchSize(candidates.length, "submit");
+      state.chats[chatKey] = {
+        url: project.url,
+        title: null,
+        titleVerified: false,
+        projectUrl: project.url,
+        updatedAt: new Date().toISOString(),
+        pendingPinIds: expectedPinIds,
+        pendingCandidates: persistedAuditCandidates(candidates),
+        submissionStatus: "armed"
+      };
+      await writeJsonAtomic(stateFile, state);
+      try {
+        await sendReferenceAuditPromptWithPacing({
+          page,
+          prompt: referenceAuditPrompt(type, candidates),
+          state,
+          stateFile,
+          pacing,
+          chatUrl: project.url
+        });
+      } catch (error) {
+        const definitelyNotAttempted = [
+          "CHATGPT_SUBMISSION_NOT_ATTEMPTED",
+          "CHATGPT_RATE_LIMITED_NOT_ATTEMPTED"
+        ].includes(error?.code);
+        state.chats[chatKey] = {
+          ...state.chats[chatKey],
+          updatedAt: new Date().toISOString(),
+          submissionStatus: definitelyNotAttempted ? "not-attempted" : "submission-unconfirmed",
+          submissionError: String(error?.message || error)
+        };
+        if (definitelyNotAttempted) {
+          state.chats[chatKey].pendingPinIds = [];
+          state.chats[chatKey].pendingCandidates = [];
+        }
+        await writeJsonAtomic(stateFile, state);
+        throw error;
+      }
       const createdUrl = await waitForConversationUrl(page, 30_000);
       if (!createdUrl) throw new Error(`无法在当日项目中创建“${title}”审核聊天`);
-      saved = { url: createdUrl, title: null, titleVerified: false, projectUrl: project.url, updatedAt: new Date().toISOString(), pendingPinIds: [] };
+      saved = {
+        ...state.chats[chatKey],
+        url: createdUrl,
+        updatedAt: new Date().toISOString(),
+        submissionStatus: "submitted-observed"
+      };
       state.chats[chatKey] = saved;
       await writeJsonAtomic(stateFile, state);
-      let titleVerified = false;
-      try {
-        await ensureDirectionChatTitle(page, project, createdUrl, title);
-        titleVerified = true;
-      } catch (error) {
-        console.warn(`审核聊天“${title}”重命名尚未确认，已保存 URL 供后续重试：${error.message}`);
-      }
-      saved = { ...saved, title, titleVerified, updatedAt: new Date().toISOString() };
-      state.chats[chatKey] = saved;
-      await writeJsonAtomic(stateFile, state);
+      submittedWhileCreating = true;
     }
   }
   await openDirectionChat(page, project, saved.url);
@@ -1502,12 +1597,13 @@ export async function reviewReferenceCandidates({ page, project, config, runDir,
   }
   const timeout = minuteTimeout(config?.collection?.visualReviewTimeoutMinutes || 4);
   const initialSnapshots = await conversationTextSnapshots(page, {
-    savedConversationPollIntervalMs: pacing.savedConversationPollIntervalMs
+    includeSavedConversation: !submittedWhileCreating,
+    savedConversationPollIntervalMs: pacing.savedConversationPollIntervalMs,
+    reason: "reference-audit-recovery"
   });
   const knownKeys = new Set(initialSnapshots.flatMap((text) => referenceAuditObservations(text, candidates).map((item) => item.key)));
   let response = latestReferenceAuditResponse(initialSnapshots, candidates);
   if (!response) {
-    const expectedPinIds = candidates.map((item) => String(item.pinId));
     const pendingPinIds = (state.chats?.[chatKey]?.pendingPinIds || []).map(String);
     const submissionDisposition = referenceAuditSubmissionDisposition(expectedPinIds, pendingPinIds);
     assertReferenceAuditSubmissionBatchSize(candidates.length, submissionDisposition);
@@ -1577,6 +1673,7 @@ export async function reviewReferenceCandidates({ page, project, config, runDir,
     response = await waitForReferenceAuditResponse(page, candidates, timeout, knownKeys, {
       domPollIntervalMs: pacing.domPollIntervalMs,
       savedConversationPollIntervalMs: pacing.savedConversationPollIntervalMs,
+      savedConversationFallbackAfterMs: pacing.savedConversationFallbackAfterMs,
       onRateLimit: (notice) => recoverReferenceAuditRateLimit({
         page,
         state,
@@ -1643,12 +1740,31 @@ async function visibleImageSources(page) {
     .filter(Boolean));
 }
 
-async function imageSourceSnapshot(page) {
-  const [visible, saved] = await Promise.all([
-    visibleImageSources(page),
-    conversationApiImages(page)
-  ]);
-  return [...new Set([...visible, ...saved.map((candidate) => candidate.key)])];
+async function visibleAssistantImageSources(page, assistantBaseline = 0) {
+  const messages = page.locator('[data-message-author-role="assistant"]');
+  const count = await messages.count().catch(() => assistantBaseline);
+  const sources = [];
+  for (let index = Math.max(0, assistantBaseline); index < count; index += 1) {
+    const images = messages.nth(index).locator("img");
+    sources.push(...await images.evaluateAll((nodes) => nodes
+      .filter((image) => {
+        const rect = image.getBoundingClientRect();
+        return (image.naturalWidth >= 256 && image.naturalHeight >= 256)
+          || (rect.width >= 100 && rect.height >= 80);
+      })
+      .map((image) => image.currentSrc || image.src)
+      .filter(Boolean)).catch(() => []));
+  }
+  return [...new Set(sources)];
+}
+
+export async function imageSourceSnapshot(page) {
+  // Baselines are captured immediately before a prompt is submitted. Reading
+  // the saved-conversation endpoint here defeats the DOM-only grace period and
+  // can trigger conversation-history rate limits as soon as a chat is opened.
+  // Saved conversation data remains available only in the delayed monitoring
+  // fallbacks after the configured grace period.
+  return visibleImageSources(page);
 }
 
 async function downloadConversationApiImage(page, candidate, file) {
@@ -1745,9 +1861,11 @@ async function visibleStopButton(page) {
   return false;
 }
 
-async function waitForBatchImageCandidates(page, timeout, previousSources = [], assistantBaseline = 0, onRateLimit = null) {
+async function waitForBatchImageCandidates(page, timeout, previousSources = [], assistantBaseline = 0, onRateLimit = null, pacing = {}, submittedAfter = 0) {
   const started = Date.now();
   let deadline = started + timeout + 18_000;
+  const savedConversationPollIntervalMs = pacing.savedConversationPollIntervalMs || SAVED_CONVERSATION_POLL_INTERVAL_MS;
+  const savedConversationFallbackAfterMs = pacing.savedConversationFallbackAfterMs || 60_000;
   const previous = new Set(previousSources);
   const candidates = new Map();
   let stableSince = null;
@@ -1771,10 +1889,14 @@ async function waitForBatchImageCandidates(page, timeout, previousSources = [], 
         throw error;
       }
     }
-    for (const candidate of await conversationApiImages(page)) {
-      if (!previous.has(candidate.key)) candidates.set(candidate.key, { ...candidate, sourceType: "saved" });
+    if (savedConversationFallbackDue({ startedAt: started, fallbackAfterMs: savedConversationFallbackAfterMs, deadline })) {
+      for (const candidate of await conversationApiImages(page, savedConversationPollIntervalMs, "batch-image-fallback")) {
+        if (batchSavedImageCandidateEligible(candidate, previous, submittedAfter)) {
+          candidates.set(candidate.key, { ...candidate, sourceType: "saved" });
+        }
+      }
     }
-    for (const src of await visibleImageSources(page)) {
+    for (const src of await visibleAssistantImageSources(page, assistantBaseline)) {
       if (!previous.has(src) && !candidates.has(src)) candidates.set(src, { key: src, src, sourceType: "visible" });
     }
     if (candidates.size !== lastCount) {
@@ -1793,6 +1915,52 @@ async function waitForBatchImageCandidates(page, timeout, previousSources = [], 
   throw new Error("等待 ChatGPT 批量生成透明素材超时");
 }
 
+export async function assignBatchTransparentCandidates({ layers, candidates, outputDir, thresholds = {} }) {
+  const rasterLayers = layers.filter(isRasterAsset).sort((left, right) => left.assetIndex - right.assetIndex);
+  const results = new Map();
+  const rejectedDir = path.join(outputDir, "rejected-candidates");
+  let candidateIndex = 0;
+  for (const layer of rasterLayers) {
+    let accepted = null;
+    let lastRejected = null;
+    while (candidateIndex < candidates.length && !accepted) {
+      const candidate = candidates[candidateIndex];
+      candidateIndex += 1;
+      const result = await acceptBatchGeneratedTransparentAsset({ candidateFile: candidate.file, layer, outputDir, thresholds });
+      if (result.status === "accepted") {
+        accepted = result;
+        await fs.rm(candidate.file, { force: true });
+        break;
+      }
+      await fs.mkdir(rejectedDir, { recursive: true });
+      const evidenceFile = path.join(
+        rejectedDir,
+        `${String(candidateIndex).padStart(2, "0")}-${String(layer.id || "asset").replace(/[^a-z0-9_-]+/gi, "-")}.png`
+      );
+      await fs.rename(candidate.file, evidenceFile).catch(async () => {
+        await fs.copyFile(candidate.file, evidenceFile);
+        await fs.rm(candidate.file, { force: true });
+      });
+      lastRejected = { ...result, evidenceFile: path.resolve(evidenceFile) };
+    }
+    results.set(layer.id, accepted || lastRejected || {
+      status: "rejected",
+      engine: "chatgpt-batch-transparent",
+      reason: "ChatGPT 本次批量返回未包含该素材"
+    });
+  }
+  for (; candidateIndex < candidates.length; candidateIndex += 1) {
+    const candidate = candidates[candidateIndex];
+    await fs.mkdir(rejectedDir, { recursive: true });
+    const evidenceFile = path.join(rejectedDir, `${String(candidateIndex + 1).padStart(2, "0")}-unassigned.png`);
+    await fs.rename(candidate.file, evidenceFile).catch(async () => {
+      await fs.copyFile(candidate.file, evidenceFile);
+      await fs.rm(candidate.file, { force: true });
+    });
+  }
+  return results;
+}
+
 async function collectBatchTransparentAssets({
   page,
   layers,
@@ -1801,11 +1969,12 @@ async function collectBatchTransparentAssets({
   previousSources,
   assistantBaseline,
   thresholds,
-  onRateLimit = null
+  onRateLimit = null,
+  pacing = {},
+  submittedAfter = 0
 }) {
   const rasterLayers = layers.filter(isRasterAsset).sort((left, right) => left.assetIndex - right.assetIndex);
-  const candidates = await waitForBatchImageCandidates(page, timeout, previousSources, assistantBaseline, onRateLimit);
-  const results = new Map();
+  const candidates = await waitForBatchImageCandidates(page, timeout, previousSources, assistantBaseline, onRateLimit, pacing, submittedAfter);
   const uniqueCandidates = [];
   const downloadedHashes = new Set();
   for (let index = 0; index < candidates.length; index += 1) {
@@ -1824,18 +1993,7 @@ async function collectBatchTransparentAssets({
     downloadedHashes.add(hash);
     uniqueCandidates.push({ file: candidateFile, hash });
   }
-  for (let index = 0; index < rasterLayers.length; index += 1) {
-    const layer = rasterLayers[index];
-    const candidate = uniqueCandidates[index];
-    if (!candidate) {
-      results.set(layer.id, { status: "rejected", engine: "chatgpt-batch-transparent", reason: "ChatGPT 本次批量返回未包含该素材" });
-      continue;
-    }
-    const result = await acceptBatchGeneratedTransparentAsset({ candidateFile: candidate.file, layer, outputDir, thresholds });
-    await fs.rm(candidate.file, { force: true });
-    results.set(layer.id, result);
-  }
-  await Promise.all(uniqueCandidates.slice(rasterLayers.length).map((candidate) => fs.rm(candidate.file, { force: true })));
+  const results = await assignBatchTransparentCandidates({ layers: rasterLayers, candidates: uniqueCandidates, outputDir, thresholds });
   return { results, returnedCount: uniqueCandidates.length };
 }
 
@@ -1886,9 +2044,11 @@ async function acceptDownloadedImage(page, file, src, previous, excludedFiles, t
   return true;
 }
 
-async function saveLastAssistantImage(page, file, timeout, previousSources = [], excludedFiles = [], assistantBaseline = 0, onRateLimit = null) {
+async function saveLastAssistantImage(page, file, timeout, previousSources = [], excludedFiles = [], assistantBaseline = 0, onRateLimit = null, pacing = {}) {
   const started = Date.now();
   let deadline = started + timeout + 15_000;
+  const savedConversationPollIntervalMs = pacing.savedConversationPollIntervalMs || SAVED_CONVERSATION_POLL_INTERVAL_MS;
+  const savedConversationFallbackAfterMs = pacing.savedConversationFallbackAfterMs || 60_000;
   const previous = new Set(previousSources);
   while (Date.now() < deadline) {
     const notice = await visibleChatGptRateLimitNotice(page);
@@ -1914,17 +2074,19 @@ async function saveLastAssistantImage(page, file, timeout, previousSources = [],
         throw error;
       }
     }
-    const savedImages = await conversationApiImages(page);
-    const savedCandidate = [...savedImages].reverse().find((candidate) => !previous.has(candidate.key));
-    if (savedCandidate && await downloadConversationApiImage(page, savedCandidate, file)) {
-      if (await acceptDownloadedImage(
-        page,
-        file,
-        savedCandidate.key,
-        previous,
-        excludedFiles,
-        Math.max(1000, timeout - (Date.now() - started))
-      )) return;
+    if (savedConversationFallbackDue({ startedAt: started, fallbackAfterMs: savedConversationFallbackAfterMs, deadline })) {
+      const savedImages = await conversationApiImages(page, savedConversationPollIntervalMs, "preview-image-fallback");
+      const savedCandidate = [...savedImages].reverse().find((candidate) => !previous.has(candidate.key));
+      if (savedCandidate && await downloadConversationApiImage(page, savedCandidate, file)) {
+        if (await acceptDownloadedImage(
+          page,
+          file,
+          savedCandidate.key,
+          previous,
+          excludedFiles,
+          Math.max(1000, timeout - (Date.now() - started))
+        )) return;
+      }
     }
     const sources = await visibleImageSources(page);
     const src = [...sources].reverse().find((value) => !previous.has(value));
@@ -2255,6 +2417,7 @@ export async function decomposePreview(
   const timeout = minuteTimeout(decompositionTimeout);
   const assetTimeout = minuteTimeout(assetConfig.timeoutMinutes ?? 5);
   const rateLimitCooldownMs = chatGptRateLimitCooldownMs(config);
+  const conversationPacing = generationConversationPacing(config);
   const recoverCurrentChatRateLimit = async (notice, stageKey) => {
     const chatUrl = conversationUrl(page.url());
     if (!chatUrl) throwIfVisibleChatGptRateLimited(notice);
@@ -2301,7 +2464,10 @@ export async function decomposePreview(
               remainingAttemptTimeout(attemptStartedAt, timeout),
               chatStageMonitoringTimeout(submission.record, timeout)
             ),
-            { onRateLimit: (notice) => recoverCurrentChatRateLimit(notice, decompositionStageKey) }
+            {
+              ...conversationPacing,
+              onRateLimit: (notice) => recoverCurrentChatRateLimit(notice, decompositionStageKey)
+            }
           );
           await setChatStageStatus(chatStageStateFile, decompositionStageKey, {
             promptKey: decompositionPromptKey,
@@ -2390,7 +2556,9 @@ export async function decomposePreview(
       previousSources,
       assistantBaseline,
       thresholds: assetConfig,
-      onRateLimit: (notice) => recoverCurrentChatRateLimit(notice, stageKey)
+      onRateLimit: (notice) => recoverCurrentChatRateLimit(notice, stageKey),
+      pacing: conversationPacing,
+      submittedAfter: Date.parse(submission.record.submittedAt || submission.record.armedAt || "") / 1000 || 0
     });
     for (const [layerId, result] of collected.results) assetResults.set(layerId, result);
     await setChatStageStatus(chatStageStateFile, stageKey, {
@@ -2439,6 +2607,8 @@ export async function generateDirections({
   references,
   count,
   directionTypes = null,
+  startDirection = 1,
+  retryDirection = null,
   runDate = null,
   initialProject = null,
   onProjectReady = async () => {},
@@ -2482,6 +2652,10 @@ export async function generateDirections({
   const historicalFailures = new Set(activeDirectionFailures(manifest)
     .filter((item) => item.stage !== "collection" && item.stage !== "analysis")
     .map((item) => item.index));
+  if (retryDirection !== null && Number.isInteger(Number(retryDirection))) {
+    manifest.failures = (manifest.failures || []).filter((item) => item.index !== Number(retryDirection));
+    await writeJsonAtomic(manifestFile, manifest);
+  }
   let project = initialProject;
   if (manifest.chatgptProject?.url) {
     const savedProject = {
@@ -2501,10 +2675,13 @@ export async function generateDirections({
     await onProjectReady(manifest.chatgptProject);
   }
 
-  const processingQueue = directionProcessingOrder(count, manifest).map((index) => ({
+  const normalizedStartDirection = Math.max(1, Math.floor(Number(startDirection) || 1));
+  const processingQueue = directionProcessingOrder(count, manifest)
+    .filter((index) => index >= normalizedStartDirection)
+    .map((index) => ({
     index,
     historicalFailure: historicalFailures.has(index)
-  }));
+    }));
   for (let queuePosition = 0; queuePosition < processingQueue.length; queuePosition += 1) {
     const { index, historicalFailure } = processingQueue[queuePosition];
     const retainedFailure = activeDirectionFailures(manifest).find((item) => item.index === index);
@@ -2586,13 +2763,15 @@ export async function generateDirections({
     const generationStageKey = "generation";
     const generationPromptKey = `generation:${index}:${type}:${path.basename(referenceFiles[0])}:${referenceStat.size}:${Math.floor(referenceStat.mtimeMs)}`;
     const rateLimitCooldownMs = chatGptRateLimitCooldownMs(config);
+    const conversationPacing = generationConversationPacing(config);
     let lastError;
     let chatOpened = false;
     const savedDirectionChat = () => manifest.directionChats[String(index)]?.url
       || (manifest.failures || []).find((item) => item.index === index)?.chatUrl;
     let referenceAvailableInConversation = generationReferenceReceiptValid(attachmentReceipt, referenceFiles)
       && Boolean(savedDirectionChat());
-    const rememberConversation = async () => {
+    let renameAttempted = false;
+    const rememberConversation = async ({ rename = false } = {}) => {
       const url = conversationUrl(page.url());
       if (!url) return null;
       let previous = manifest.directionChats[String(index)];
@@ -2601,7 +2780,8 @@ export async function generateDirections({
         manifest.directionChats[String(index)] = previous;
         await writeJsonAtomic(manifestFile, manifest);
       }
-      if (previous.title !== chatTitle) {
+      if (rename && previous.title !== chatTitle && !renameAttempted) {
+        renameAttempted = true;
         try {
           await ensureDirectionChatTitle(page, project, url, chatTitle);
           manifest.directionChats[String(index)] = {
@@ -2732,7 +2912,8 @@ export async function generateDirections({
                     onState: (rateLimit) => setChatStageStatus(chatStageStateFile, generationStageKey, { rateLimit })
                   });
                   chatOpened = true;
-                }
+                },
+                conversationPacing
               );
             } catch (error) {
               if (error?.code === "REFERENCE_ATTACHMENT_MISSING" || error?.code === "CHATGPT_IMAGE_GENERATION_FAILED") {
@@ -2790,7 +2971,7 @@ export async function generateDirections({
         error.stage ||= "decomposition";
         throw error;
       }
-      const chatUrl = await rememberConversation();
+      const chatUrl = await rememberConversation({ rename: true });
 
       const entry = {
         index, status: "ready", type, contentScope: type === "popup" ? "popup-only" : "full-canvas", ...size, previewFile,

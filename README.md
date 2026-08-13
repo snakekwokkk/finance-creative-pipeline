@@ -41,7 +41,7 @@ Finance Creative Pipeline 是一个面向中国互联网金融运营素材的 Co
 - 参考图用于确定主视觉类别、材质气质、颜色关系和信息层级；可保留相近的金融主体（如红包或相近权益材质），同时重设计具体造型细节、文案和局部排布，避免完整照搬。
 - 透明素材只接受 ChatGPT 在同一方向聊天中一次批量生成的独立透明 PNG。禁止从完整预览裁切元素，也禁止本地背景差分、抠图、去背景、透明边裁切或 Alpha 修复；视觉上连成一体的复杂主视觉保持为一个素材，空间上独立的复杂视觉分别返回。
 - 拆图回复以最新完整且非空的 `DECOMPOSE_START` / `DECOMPOSE_END` 标记 JSON 为完成信号，不依赖单一消息选择器或停止按钮。恢复与重试前先扫描已有聊天，发现完整结果就立即保存，不重复提交。
-- 采集审核只提交花瓣当日新鲜的公开图片直链，每批固定 6 个；ChatGPT 必须实际打开图片并返回 `imageAccessible: true` 才可通过。回复以当前批次 Pin ID 完全匹配的 `REFERENCE_AUDIT_START` / `REFERENCE_AUDIT_END` 标记 JSON 为完成信号。页面文字默认每秒本地检查一次，已保存对话接口最多每 15 秒读取一次，审核提示词至少间隔 30 秒；若出现“操作太频繁”，当前批次会落盘并自动冷却 10 分钟，再从同一聊天继续监听。只有输入框和提示明确证明原点击被拒绝时，冷却后才允许重试一次。审核通过后才下载原图并进行像素、哈希和重复性校验。
+- 采集审核只提交花瓣当日新鲜的公开图片直链，每批固定 6 个；第一条正式审核提示直接创建项目聊天，不再额外发送初始化消息。ChatGPT 必须实际打开图片并返回 `imageAccessible: true` 才可通过。回复以当前批次 Pin ID 完全匹配的 `REFERENCE_AUDIT_START` / `REFERENCE_AUDIT_END` 标记 JSON 为完成信号。页面文字默认每秒本地检查一次；连续 60 秒看不到结果或临近超时才读取已保存对话，默认至少间隔 120 秒。审核提示词至少间隔 30 秒；若出现“操作太频繁”，当前批次会落盘并自动冷却 10 分钟，再从同一聊天继续监听。审核通过后才下载原图并进行像素、哈希和重复性校验。
 - 本地只验证尺寸、Alpha、前景比例、透明比例和文件重复性，不修改 ChatGPT 返回的像素。
 - 空白、不透明或重复输出会被拒绝。ChatGPT 返回少于请求数量时，保留全部有效素材并将报告记为 `partial`，不逐元素追问或修复；缺少关键素材导致明显空洞时，最终 Figma QA 仍会失败。
 - 每个运行日期只使用一个名为 `金融运营素材 YYYY-MM-DD` 的 ChatGPT 项目。候选内容审核聊天 `采集筛选-弹窗/Banner/浮窗` 和正式方向聊天都保存在该日期项目内；每个设计方向仍只使用一个聊天完成直接生图和拆图。
@@ -123,6 +123,14 @@ npm run run
 codex plugin add finance-creative-pipeline@<marketplace-name>
 ```
 
+Resume from a specific direction without rerunning collection or earlier directions:
+
+```bash
+node scripts/run.mjs --from-direction 3 --visible
+```
+
+`--help` prints usage and exits before configuration, browser launch, or workflow state changes.
+
 本地开发更新后，应更新 `.codex-plugin/plugin.json` 的 cachebuster 并重新安装插件。新技能内容会在新 Codex 任务中加载。
 
 ### 配置说明
@@ -149,7 +157,8 @@ codex plugin add finance-creative-pipeline@<marketplace-name>
 | `collection.visualReviewTimeoutMinutes` | 每批直链审核等待上限，默认 4 分钟 |
 | `collection.visualReviewMaxAttempts` | 每批候选内容审核总尝试次数，默认 2 |
 | `collection.visualReviewDomPollIntervalSeconds` | 审核等待期间本地页面文字检查间隔，默认 1 秒 |
-| `collection.visualReviewSavedConversationPollIntervalSeconds` | ChatGPT 已保存对话接口读取间隔，默认 15 秒 |
+| `collection.visualReviewSavedConversationPollIntervalSeconds` | ChatGPT 已保存对话兜底读取间隔，默认 120 秒 |
+| `collection.visualReviewSavedConversationFallbackAfterSeconds` | 只检查页面、暂不读取对话记录的时长，默认 60 秒 |
 | `collection.visualReviewSubmissionIntervalSeconds` | 审核聊天提示词的最小提交间隔，默认 30 秒 |
 | `collection.visualReviewRateLimitCooldownMinutes` | 参考图审核检测到“操作太频繁”后的自动冷却时间，默认 10 分钟；冷却后刷新原聊天，提示仍在则继续下一轮冷却 |
 | `generation.rateLimitCooldownMinutes` | 生图、语义分层和透明素材检测到“操作太频繁”后的自动冷却时间，默认 10 分钟；保留提交锁并循环等待、刷新原聊天，不重复提交 |
@@ -312,9 +321,10 @@ A normal run collects 10 references and generates 10 original directions: five p
 - References provide the visual category, material feel, color relationship, and information hierarchy. Generated work may retain a similar financial subject while redesigning concrete shape details, copy, and local layout instead of copying the full design.
 - Never crop elements from the preview and never run local matting. ChatGPT is asked once to return separate transparent PNGs for every declared complex visual; already-transparent outputs are validated and copied without pixel modification.
 - Semantic decomposition completes as soon as the newest non-empty `DECOMPOSE_START` / `DECOMPOSE_END` JSON block is available. It does not depend on one assistant-message selector or the stop control disappearing, and resume/retry paths consume an existing complete response before submitting again.
-- Reference content review submits only fresh public Huaban image URLs, exactly six per new batch. ChatGPT must actually open each URL and return `imageAccessible: true`; only accepted links are downloaded for pixel, hash, and duplicate checks. Completion uses the newest `REFERENCE_AUDIT_START` / `REFERENCE_AUDIT_END` JSON block whose Pin IDs exactly match the current batch, checking the rendered page once per second and the saved conversation no more than once every 15 seconds.
+- Reference content review submits only fresh public Huaban image URLs, exactly six per new batch. The first real audit prompt creates the project chat, so no bootstrap message is spent. ChatGPT must actually open each URL and return `imageAccessible: true`; only accepted links are downloaded for pixel, hash, and duplicate checks. Completion checks the rendered page first and reads the saved conversation only as a delayed fallback, no more than once every 120 seconds by default.
 - Local processing only validates Alpha, dimensions, foreground ratio, and duplicate bytes; it does not crop, trim, infer Alpha, or remove backgrounds.
 - Empty or opaque assets remain rejected. If ChatGPT returns fewer images than requested, every valid returned image is retained and a partial direction may continue into Figma without per-element retry.
+- Batch asset matching is scoped to assistant turns created after the batch prompt. An opaque or stale candidate does not consume the requested asset slot; later valid transparent PNGs are still tested, while rejected and unassigned candidates are retained under `layers/rejected-candidates/` as evidence.
 - Each run date uses one ChatGPT project named `金融运营素材 YYYY-MM-DD`. The `采集筛选-弹窗/Banner/浮窗` content-audit chats and every direction-generation chat stay inside that dated project. Each design direction still uses exactly one chat for direct generation and decomposition.
 - Project chats are explicitly renamed with type-local numbering: `弹窗1`–`弹窗5`, `Banner1`–`Banner3`, and `浮窗1`–`浮窗2`. Isolated validation runs start each included type at 1 instead of using the global direction index.
 - Reference images use ChatGPT's image-specific upload input. After the expected filename, rendered thumbnail, and send-ready state are verified, the same message asks ChatGPT to understand the reference internally and directly generate the preview. The normal successful path uploads once and produces no intermediate analysis, design spec, or visible image prompt. Ordinary generation retries reuse the reference already present in the chat; re-upload occurs only when ChatGPT explicitly reports the reference missing.
@@ -413,7 +423,10 @@ User configuration lives outside the repository and should never be committed:
 | `collection.visualReviewTimeoutMinutes` | Wait limit per URL content-audit batch; defaults to 4 minutes |
 | `collection.visualReviewMaxAttempts` | Content-audit attempts per batch; defaults to 2 |
 | `collection.visualReviewDomPollIntervalSeconds` | Local rendered-text polling interval while waiting; defaults to 1 second |
-| `collection.visualReviewSavedConversationPollIntervalSeconds` | Saved-conversation API polling interval; defaults to 15 seconds |
+| `collection.visualReviewSavedConversationPollIntervalSeconds` | Saved-conversation fallback interval; defaults to 120 seconds |
+| `collection.visualReviewSavedConversationFallbackAfterSeconds` | DOM-only review window before saved-conversation fallback; defaults to 60 seconds |
+| `generation.savedConversationPollIntervalSeconds` | Saved-conversation fallback interval for generation/decomposition; defaults to 120 seconds |
+| `generation.savedConversationFallbackAfterSeconds` | DOM-only generation/decomposition window before fallback; defaults to 60 seconds |
 | `collection.visualReviewSubmissionIntervalSeconds` | Minimum spacing between audit-chat prompt submissions; defaults to 30 seconds |
 | `collection.visualReviewRateLimitCooldownMinutes` | Automatic cooldown for reference-audit frequency limits; defaults to 10 minutes and repeats after refreshing the same chat while the notice remains |
 | `generation.rateLimitCooldownMinutes` | Automatic cooldown for generation, decomposition, and transparent-asset frequency limits; defaults to 10 minutes and preserves the submit-once lock while refreshing the same chat |

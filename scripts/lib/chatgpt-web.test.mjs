@@ -6,8 +6,10 @@ import test from "node:test";
 import sharp from "sharp";
 import {
   activeDirectionFailures,
+  assignBatchTransparentCandidates,
   assertReferenceAuditSubmissionBatchSize,
   assistantReportsMissingReferenceImages,
+  batchSavedImageCandidateEligible,
   batchTransparentAssetsPrompt,
   attachmentDeliveryStatus,
   chatGptLoginRequired,
@@ -41,7 +43,6 @@ import {
   readyDirectionsForFigma,
   referenceAuditPacing,
   referenceAuditChatTitle,
-  referenceAuditChatBootstrapPrompt,
   referenceAuditPrompt,
   referenceAuditSubmissionDelayMs,
   referenceAuditSubmissionDisposition,
@@ -52,12 +53,15 @@ import {
   rejectedReferenceSourceSet,
   generationReferenceReceiptValid,
   generationReferenceUploadRequired,
+  generationConversationPacing,
+  imageSourceSnapshot,
   latestNewDecompositionResponse,
   latestNewDecompositionObservation,
   latestReferenceAuditResponse,
   latestNewReferenceAuditObservation,
   referenceAuditObservations,
   referenceAuditJsonResponses,
+  savedConversationFallbackDue,
   requiresUserAction,
   rasterNeedsReconstruction,
   runDecompositionAttempts,
@@ -317,7 +321,8 @@ test("an unchanged ready composer is recoverable instead of ambiguously locked",
 test("reference audit pacing uses conservative defaults and accepts explicit overrides", () => {
   assert.deepEqual(referenceAuditPacing(), {
     domPollIntervalMs: 1_000,
-    savedConversationPollIntervalMs: 15_000,
+    savedConversationPollIntervalMs: 120_000,
+    savedConversationFallbackAfterMs: 60_000,
     submissionIntervalMs: 30_000,
     rateLimitCooldownMs: 600_000
   });
@@ -325,15 +330,75 @@ test("reference audit pacing uses conservative defaults and accepts explicit ove
     collection: {
       visualReviewDomPollIntervalSeconds: 2,
       visualReviewSavedConversationPollIntervalSeconds: 20,
+      visualReviewSavedConversationFallbackAfterSeconds: 45,
       visualReviewSubmissionIntervalSeconds: 45,
       visualReviewRateLimitCooldownMinutes: 12
     }
   }), {
     domPollIntervalMs: 2_000,
-    savedConversationPollIntervalMs: 20_000,
+    savedConversationPollIntervalMs: 30_000,
+    savedConversationFallbackAfterMs: 45_000,
     submissionIntervalMs: 45_000,
     rateLimitCooldownMs: 720_000
   });
+});
+
+test("saved conversations are delayed fallbacks for all ChatGPT stages", () => {
+  assert.deepEqual(generationConversationPacing(), {
+    savedConversationPollIntervalMs: 120_000,
+    savedConversationFallbackAfterMs: 60_000
+  });
+  assert.equal(savedConversationFallbackDue({ startedAt: 1_000, now: 59_000, fallbackAfterMs: 60_000 }), false);
+  assert.equal(savedConversationFallbackDue({ startedAt: 1_000, now: 61_000, fallbackAfterMs: 60_000 }), true);
+  assert.equal(savedConversationFallbackDue({ startedAt: 1_000, now: 20_000, deadline: 30_000, boundaryWindowMs: 15_000 }), true);
+});
+
+test("image baselines stay DOM-only and never fetch saved conversation history", async () => {
+  let evaluated = false;
+  const page = {
+    evaluate: async () => { evaluated = true; },
+    locator: () => ({
+      evaluateAll: async () => ["blob:https://chatgpt.com/current-image"],
+      count: async () => 1,
+      nth: () => ({
+        locator: () => ({
+          evaluateAll: async () => ["blob:https://chatgpt.com/current-image"]
+        })
+      })
+    })
+  };
+  assert.deepEqual(await imageSourceSnapshot(page), ["blob:https://chatgpt.com/current-image"]);
+  assert.equal(evaluated, false);
+});
+
+test("batch asset mapping skips an opaque stale candidate and accepts the later transparent image", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "finance-batch-candidate-order-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const outputDir = path.join(root, "layers");
+  await fs.mkdir(outputDir, { recursive: true });
+  const opaque = path.join(root, "opaque-preview.png");
+  const transparent = path.join(root, "transparent-asset.png");
+  await sharp({ create: { width: 300, height: 300, channels: 3, background: "#ffffff" } }).png().toFile(opaque);
+  await sharp({ create: { width: 300, height: 300, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } } })
+    .composite([{ input: Buffer.from('<svg width="140" height="140"><circle cx="70" cy="70" r="65" fill="#22bb77"/></svg>'), left: 80, top: 80 }])
+    .png()
+    .toFile(transparent);
+  const layer = { id: "hero", editable: "raster", kind: "hero", assetIndex: 0 };
+  const results = await assignBatchTransparentCandidates({
+    layers: [layer],
+    candidates: [{ file: opaque }, { file: transparent }],
+    outputDir
+  });
+  const result = results.get("hero");
+  assert.equal(result.status, "accepted");
+  assert.equal((await sharp(result.file).metadata()).hasAlpha, true);
+  assert.equal((await fs.readdir(path.join(outputDir, "rejected-candidates"))).length, 1);
+});
+
+test("saved batch images must be new relative to both the baseline and submission time", () => {
+  assert.equal(batchSavedImageCandidateEligible({ key: "file:old", createdAt: 100 }, ["file:old"], 50), false);
+  assert.equal(batchSavedImageCandidateEligible({ key: "file:stale", createdAt: 40 }, [], 50), false);
+  assert.equal(batchSavedImageCandidateEligible({ key: "file:new", createdAt: 60 }, [], 50), true);
 });
 
 test("reference audit submission spacing survives restarts through timestamps", () => {
@@ -359,7 +424,6 @@ test("ChatGPT frequency-limit notices are recognized without matching ordinary r
 test("reference content audits live in dated-project chats and rely on image content", () => {
   assert.equal(referenceAuditChatTitle("popup"), "采集筛选-弹窗");
   assert.equal(referenceAuditChatTitle("banner"), "采集筛选-Banner");
-  assert.match(referenceAuditChatBootstrapPrompt("采集筛选-弹窗"), /REFERENCE_AUDIT_READY/);
   const candidates = [
     { pinId: "p1", imageUrl: "https://img.example/p1.webp", title: "IMG_4953", searchKeyword: "借贷 活动弹窗", width: 900, height: 1600 },
     { pinId: "p2", imageUrl: "https://img.example/p2.webp", title: "促销元素", searchKeyword: "借贷 活动弹窗", width: 800, height: 800 }
@@ -713,6 +777,13 @@ test("resumed runs keep strict direction order even when an earlier direction fa
   assert.deepEqual(directionProcessingOrder(5, manifest), [1, 2, 3, 4, 5]);
   assert.equal(directionAttemptLimit({ generation: { maxAttempts: 2 } }), 2);
   assert.equal(directionAttemptLimit({ generation: { maxAttempts: 2 } }, true), 1);
+});
+
+test("direction recovery can start from a later numeric direction", () => {
+  assert.deepEqual(
+    directionProcessingOrder(10, {}).filter((index) => index >= 3),
+    [3, 4, 5, 6, 7, 8, 9, 10]
+  );
 });
 
 test("an incomplete current direction gets a persisted five-minute cooldown", () => {
